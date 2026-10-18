@@ -1,47 +1,36 @@
-/**
- * ESTY EVENTS — FICHIER À CHANGER POUR CHAQUE ANIMATION.
- * Tu peux remplacer CE fichier sur GitHub sans toucher à bot.js ni db.js.
- * Les problèmes ajoutés avec /probleme ajouter sont dans PostgreSQL.
+/** Don Juan du serveur — scénario de test.
+ * Les inscriptions, MP, votes et éliminations sont gérés par /donjuan.
+ * Les dossiers /probleme demeurent intacts dans Neon.
  */
 module.exports = {
-  title: '🎡 LES PROBLÈMES D’ESTY',
-
+  title: '👑 DON JUAN DU SERVEUR',
   announcement: [
-    '# 🔥 AYO LES PROBLÈÈÈMES !',
-    'La Reine des Problèmes débarque sur **Les Drôles d’Humains** ! 👑',
-    'Au programme : vérités, dilemmes, gages et dossiers surprises.',
-    '🗓️ Date et heure : à annoncer par Esty.',
-    '💗 Chacun peut passer une question ; pas de harcèlement ni de révélation de données privées.'
+    '**👑 DON JUAN DU SERVEUR — Un nouveau jeu arrive !**',
+    '',
+    'Qui décrochera le titre tant convoité de **Don Juan du serveur** ?',
+    '',
+    'Les filles inscrites seront les **juges**, les garçons inscrits seront les **prétendants**. À travers plusieurs épreuves, un seul finira par être couronné...',
+    '',
+    'Le déroulement complet sera dévoilé bientôt, mais ça va être fun à suivre (et à jouer) ! 🔥',
+    '',
+    '**Pour participer**',
+    '',
+    '👉 Filles, réagissez avec 👑 pour être juge',
+    '👉 Garçons, réagissez avec 😏 pour être prétendant',
+    '',
+    '*Petite précision : en tant qu’animateur, je ne participerai pas... histoire de laisser une chance aux autres. Parce que soyons honnêtes, si j’étais candidat, on sait tous comment ça se serait terminé 🏆*',
+    '<@&1295490474165141566>'
   ].join('\n'),
-
-  intro: '🎤 **Bienvenue aux Problèmes d’Esty !** Esty contrôle le rythme avec ses commandes. Que les dossiers commencent !',
-  outro: '💋 **Fin de l’animation !** Merci les Drôles d’Humains. Les dossiers non révélés restent dans la base pour une prochaine fois.',
-
-  // /animation suivant affiche une étape à la fois.
-  // Les dossiers reçus en MP ne se mettent pas ici : /probleme ajouter.
+  intro: '👑 **DON JUAN DU SERVEUR** — Tropi mène la danse. Les candidats et juges sont invités à suivre les messages du bot.',
+  outro: '🏆 Merci à tous pour cette édition de Don Juan !',
   steps: [
-    {
-      type: 'message',
-      content: '🔥 **Manche 1 — On se chauffe !** Préparez-vous à répondre sans vous cacher !'
-    },
-    {
-      type: 'qcm',
-      question: '🎡 Pour cette soirée, vous préférez quoi ?',
-      options: ['Les révélations', 'Les gages', 'Les dilemmes', 'Tout à la fois 😈']
-    },
-    {
-      type: 'message',
-      content: '💌 **C’est l’heure des dossiers !** Esty peut utiliser /probleme tirer puis /probleme reveler.'
-    },
-    {
-      type: 'qcm',
-      question: '💬 On augmente le niveau ?',
-      options: ['Oui, carrément 🔥', 'On reste soft 🌸', 'Surprise 🎁']
-    }
+    {type:'message',content:'👑 Bienvenue à Don Juan ! Tropi gère les inscriptions et les épreuves avec les commandes /donjuan.'},
+    {type:'message',content:'💌 Les présentations et les réponses seront anonymes. Seules les juges inscrites pourront voter.'}
   ]
 };
+
+// Compatibilité avec la commande ecloudserv qui lance parfois index.js.
 if (!module.parent || !module.parent.filename?.endsWith('/bot.js')) {
-  console.log('Lancement de Maitresse du jeu...');
+  console.log('🚀 Lancement de Maîtresse du jeu depuis index.js...');
   require('./bot.js');
 }
-
