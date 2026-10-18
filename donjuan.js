@@ -11,6 +11,8 @@ const store=require('./donjuan-db');
 const {pool}=require('./db'); // Utilise la même connexion Neon que les autres jeux.
 let bot, guild, owner;
 const VOTE_EMOJI=['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+const MAX_PRETENDANTS=12; // Le vote à 11 ou 12 choix passe par un menu déroulant Discord.
+const MAX_REPONSES_PAR_ROUND=12;
 const FLAG=MessageFlags.Ephemeral;
 const command = new SlashCommandBuilder().setName('donjuan').setDescription('👑 Animation Don Juan du serveur (Tropi)')
  .addSubcommand(s=>s.setName('salon').setDescription('Définir le salon privé des juges').addChannelOption(o=>o.setName('salon').setDescription('Salon réservé aux juges').addChannelTypes(ChannelType.GuildText).setRequired(true)))
@@ -57,7 +59,7 @@ async function saveReaction(userId,emoji,add){
  if(add){
   const current=await store.entry(guild,userId);
   if(current&&current.kind!==kind)return; // impossible d'être dans deux catégories
-  if(!current){if(kind==='candidate'&&(await store.entries(guild,'candidate')).length>=10)return; // dix numéros emoji au maximum
+  if(!current){if(kind==='candidate'&&(await store.entries(guild,'candidate')).length>=MAX_PRETENDANTS)return; // Jusqu'à douze prétendants
     await store.upsertEntry(guild,userId,kind);}
   if(kind==='judge')await judgeRole(userId,s.judge_role,true);
  }else {await store.removeEntry(guild,userId,kind);
@@ -76,7 +78,8 @@ async function reactionHandler(reaction,user,add){
   if(!['presentation_vote','round_vote'].includes(s.phase)||
      reaction.message.id!==s.vote_message||reaction.message.channelId!==s.vote_channel)return;
   const idx=VOTE_EMOJI.indexOf(reaction.emoji.name),choices=s.vote_choices||[];
-  if(idx<0||idx>=choices.length)return;
+  // Pour 11 ou 12 choix, le scrutin est uniquement via menu déroulant.
+  if(choices.length>VOTE_EMOJI.length||idx<0||idx>=choices.length)return;
   const member=await store.entry(guild,user.id);
   if(member?.kind!=='judge')return;
   const expectedKind=s.phase==='presentation_vote'?'presentation':'question';
@@ -138,7 +141,7 @@ async function addCandidateDuringPresentations(userId){
   }
   const stats=await conn.query("SELECT COUNT(*)::int AS total, COALESCE(MAX(number),0)::int AS last_number FROM dj_users WHERE guild_id=$1 AND kind='candidate'",[guild]);
   const {total,last_number}=stats.rows[0];
-  if(total>=10 || last_number>=10){
+  if(total>=MAX_PRETENDANTS || last_number>=MAX_PRETENDANTS){
    await conn.query('ROLLBACK');return {status:'limit'};
   }
   const number=last_number+1;
@@ -156,12 +159,16 @@ async function sendPresentations(){
 async function sendQuestionForms(round){let count=0;for(const j of await store.entries(guild,'judge'))if(await dmUser(j.user_id,`👑 **Don Juan — Round ${round}**\nTu peux poser UNE question à un candidat actif. Tu recevras les réponses dans le salon des juges.`,[rowButton(`dj:ask:${round}`,'Poser ma question')]))count++;return count;}
 async function sendMissingAnswers(round){let count=0;for(const qu of await store.questions(guild,round))if(!qu.answer){if(await dmUser(qu.candidate_id,`📩 Question pour **Candidat #${qu.number}** :\n${qu.question}\n\nTa réponse sera publiée anonymement aux juges.`,[rowButton(`dj:answer:${qu.id}`,'Répondre')]))count++;}return count;}
 async function openVote(s,kind,options,title){
- if(options.length<1||options.length>10)throw Error('Entre 1 et 10 choix sont nécessaires pour les réactions numérotées.');
+ if(options.length<1||options.length>MAX_REPONSES_PAR_ROUND)throw Error('Entre 1 et 12 choix sont acceptés.');
  const menu=new StringSelectMenuBuilder().setCustomId(`dj:vote:${kind}:${s.round_no}`).setPlaceholder('Choisis une seule réponse').addOptions(options);
- const lines=options.map((o,j)=>`${VOTE_EMOJI[j]} ${o.label}`);
- const msg=await judgePost(s,title+'\n\n'+lines.join('\n')+'\n\n🔒 Seules les juges inscrites peuvent voter. **Un vote par juge**, modifiable avant clôture. Réagis avec un numéro ou utilise le menu ci-dessous.',[new ActionRowBuilder().addComponents(menu)]);
+ const menuSeulement=options.length>VOTE_EMOJI.length;
+ const lines=options.map((o,j)=>menuSeulement?`${j+1}. ${o.label}`:`${VOTE_EMOJI[j]} ${o.label}`);
+ const consigne=menuSeulement
+  ?'🗳️ **11 ou 12 choix : vote uniquement avec le menu déroulant ci-dessous.** Aucune réaction ne compte pour ce scrutin.'
+  :'🗳️ Réagis avec un numéro ou utilise le menu déroulant ci-dessous.';
+ const msg=await judgePost(s,title+'\n\n'+lines.join('\n')+'\n\n🔒 Seules les juges inscrites peuvent voter. **Un vote par juge**, modifiable avant clôture.\n'+consigne,[new ActionRowBuilder().addComponents(menu)]);
  await store.updateSession(guild,{vote_message:msg.id,vote_channel:msg.channelId,vote_kind:kind,vote_choices:JSON.stringify(options.map(o=>o.value))});
- for(let j=0;j<options.length;j++)await msg.react(VOTE_EMOJI[j]).catch(e=>console.warn('Ajout réaction impossible',e.message));
+ if(!menuSeulement){for(let j=0;j<options.length;j++)await msg.react(VOTE_EMOJI[j]).catch(e=>console.warn('Ajout réaction impossible',e.message));}
 }
 function anonScores(players){return players.slice().sort((a,b)=>b.score-a.score||a.number-b.number).map(p=>`#${p.number} — ${p.score} point(s)${p.active?'':' · éliminé'}`).join('\n');}
 async function showParticipants(i){
@@ -217,7 +224,7 @@ async function handleCommand(i){
   await i.deferReply({flags:FLAG});
   const result=await addCandidateDuringPresentations(user.id);
   if(result.status==='phase')return privateReply(i,'⏳ Phase modifiée : le premier vote est peut-être déjà ouvert. Aucun participant ajouté.');
-  if(result.status==='limit')return privateReply(i,'⛔ 10 prétendants maximum dans cette version. Aucun participant ajouté.');
+  if(result.status==='limit')return privateReply(i,'⛔ 12 prétendants maximum dans cette version. Aucun participant ajouté.');
   if(result.status==='existing')return privateReply(i,result.entry.kind==='candidate'
     ?`✅ <@${user.id}> est déjà candidat #${result.entry.number}. Son inscription, ses points et sa présentation restent inchangés.`
     :`⛔ <@${user.id}> est déjà inscrit comme juge. Aucun changement effectué.`);
@@ -302,11 +309,11 @@ async function handleCommand(i){
   if(!s.judges_channel)return privateReply(i,'Configure d’abord /donjuan salon.');
   const qs=(await store.questions(guild,s.round_no)).filter(x=>x.answer);
   if(qs.length<2)return privateReply(i,'Il faut au moins deux réponses pour lancer un vote. Utilise /donjuan rappels et attends les réponses.');
-  if(qs.length>10)return privateReply(i,'Maximum 10 réponses par round pour le vote à réactions numérotées. Contacte Esty pour répartir les questions.');
+  if(qs.length>MAX_REPONSES_PAR_ROUND)return privateReply(i,'Maximum 12 réponses par round pour ce vote.');
   await i.deferReply({flags:FLAG});
   await judgePost(s,`# 👑 Don Juan — Réponses du round ${s.round_no}`);
   for(const x of qs)await judgePost(s,`**Réponse #${x.id} — Candidat #${x.number}**\n**Question :** ${x.question}\n**Réponse :** ${x.answer}`);
-  const opts=qs.slice(0,10).map(x=>({label:`Réponse #${x.id} · Candidat #${x.number}`.slice(0,100),value:String(x.id)}));
+  const opts=qs.slice(0,MAX_REPONSES_PAR_ROUND).map(x=>({label:`Réponse #${x.id} · Candidat #${x.number}`.slice(0,100),value:String(x.id)}));
   
   await openVote(s,'question',opts,`# 🗳️ Vote du round ${s.round_no} — meilleure réponse`);
   await store.phaseTransition(guild,s.phase,'round_vote');
@@ -332,7 +339,7 @@ async function handleCommand(i){
   const c=await store.entries(guild,'candidate',true);if(c.length<=1)return privateReply(i,'Il ne reste qu’un candidat : /donjuan finale.');
   const min=Math.min(...c.map(p=>p.score)),bottom=c.filter(p=>p.score===min);
   const chosen=i.options.getInteger('numero');
-  if(bottom.length>1&&!chosen)return privateReply(i,`⚖️ Égalité au dernier rang entre ${bottom.map(x=>'#'+x.number).join(', ')} (${min} points). Relance /donjuan eliminer avec le numéro choisi par Tropi.`);
+  if(bottom.length>1&&!chosen)return privateReply(i,`⚖️ Égalité au dernier rang entre ${bottom.map(x=>'#'+x.number).join(', ')} (${min} points). Relance /donjuan eliminer avec le numéro choisi par l’animatrice.`);
   const p=chosen?bottom.find(x=>x.number===chosen):bottom[0];
   if(!p)return privateReply(i,'Tu peux choisir uniquement un des candidats à égalité au dernier rang.');
   await store.eliminate(guild,p.user_id);
@@ -381,7 +388,7 @@ async function handleComponent(i){
   const candidate=(await store.entries(guild,'candidate',true)).find(c=>c.number===number);
   if(!candidate||!q)return dmReply(i,'Numéro invalide ou question vide.');
   try{
-   if((await store.questions(guild,round)).length>=10)return dmReply(i,'Maximum 10 questions pour ce round. Préviens Tropi.');
+   if((await store.questions(guild,round)).length>=MAX_REPONSES_PAR_ROUND)return dmReply(i,'Maximum 12 questions pour ce round. Préviens Esty.');
    const qu=await store.addQuestion(guild,round,i.user.id,candidate.user_id,q);
    const ok=await dmUser(candidate.user_id,`📩 **Don Juan — Question pour Candidat #${number}**\n${q}\n\nRéponds anonymement avec le bouton ci-dessous.`,[rowButton(`dj:answer:${qu.id}`,'Répondre à cette question')]);
    return dmReply(i,`✅ Question enregistrée pour Candidat #${number}.${ok?'':' ⚠️ Son MP est bloqué, Tropi pourra le relancer.'}`);
