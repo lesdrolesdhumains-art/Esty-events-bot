@@ -14,6 +14,8 @@ const FLAG=MessageFlags.Ephemeral;
 const command = new SlashCommandBuilder().setName('donjuan').setDescription('👑 Animation Don Juan du serveur (Tropi)')
  .addSubcommand(s=>s.setName('salon').setDescription('Définir le salon privé des juges').addChannelOption(o=>o.setName('salon').setDescription('Salon réservé aux juges').addChannelTypes(ChannelType.GuildText).setRequired(true)))
  .addSubcommand(s=>s.setName('admin').setDescription('Autoriser Tropi à piloter le jeu (Esty seule)').addUserOption(o=>o.setName('membre').setDescription('Animateur autorisé').setRequired(true)))
+ .addSubcommand(s=>s.setName('admin-retirer').setDescription('Retirer les droits d’animateur à un prétendant (Esty seule)').addUserOption(o=>o.setName('membre').setDescription('Personne à retirer des admins').setRequired(true)))
+ .addSubcommand(s=>s.setName('juge-ajouter').setDescription('Inscrire Esty comme juge même après la clôture des inscriptions').addUserOption(o=>o.setName('membre').setDescription('Sélectionne ton propre compte Esty').setRequired(true)))
  .addSubcommand(s=>s.setName('role').setDescription('Choisir le rôle du futur Don Juan').addRoleOption(o=>o.setName('role').setDescription('Rôle Discord à attribuer').setRequired(true)))
  .addSubcommand(s=>s.setName('role-juges').setDescription('Rôle donné automatiquement aux juges inscrites').addRoleOption(o=>o.setName('role').setDescription('Rôle Discord des juges').setRequired(true)))
  .addSubcommand(s=>s.setName('inscriptions').setDescription('Lier l’annonce existante et ouvrir les inscriptions').addStringOption(o=>o.setName('message').setDescription('Lien ou ID du message d’annonce Discord').setRequired(true)))
@@ -89,14 +91,33 @@ async function reactionHandler(reaction,user,add){
  }catch(e){console.error('DonJuan réaction',e);}
 }
 async function backfill(message){
- for(const [emoji] of [['👑'],['😏']]){
+ // Relecture fidèle des réactions, y compris celles ajoutées/retirées pendant une coupure.
+ await message.fetch();
+ const reacted=new Map();
+ for(const [emoji,kind] of [['👑','judge'],['😏','candidate']]){
   const reaction=message.reactions.cache.find(r=>r.emoji.name===emoji);
   if(!reaction)continue;
   let after;
-  while(true){const users=await reaction.users.fetch({limit:100,...(after?{after}:{})});
-   for(const user of users.values())await saveReaction(user.id,emoji,true);
-   if(users.size<100)break;after=users.last().id;
+  while(true){
+   const users=await reaction.users.fetch({limit:100,...(after?{after}:{})});
+   for(const user of users.values())if(!user.bot&&!reacted.has(user.id))reacted.set(user.id,kind);
+   if(users.size<100)break;
+   after=users.last().id;
   }
+ }
+ for(const kind of ['judge','candidate']){
+  for(const u of await store.entries(guild,kind)){
+   // Le compte Esty peut être inscrit manuellement comme juge, sans réaction 👑.
+   if(u.user_id===owner && kind==='judge')continue;
+   if(reacted.get(u.user_id)!==kind){
+    await store.removeEntry(guild,u.user_id,kind);
+    if(kind==='judge')await judgeRole(u.user_id,(await store.session(guild)).judge_role,false);
+   }
+  }
+ }
+ for(const [userId,kind] of reacted){
+  if(userId===owner||await admin(userId))continue;
+  await saveReaction(userId,kind==='judge'?'👑':'😏',true);
  }
 }
 async function sendPresentations(){
@@ -128,6 +149,13 @@ async function handleCommand(i){
   const user=i.options.getUser('membre',true);if(user.bot)return privateReply(i,'Pas un compte bot.');
   await store.addAdmin(guild,user.id);return privateReply(i,`✅ <@${user.id}> peut piloter /donjuan (mais pas /animation ni /probleme).`);
  }
+ if(sub==='admin-retirer'){
+  if(i.user.id!==owner)return privateReply(i,'🔒 Esty seule peut retirer les droits d’animation.');
+  const user=i.options.getUser('membre',true);
+  if(user.id===owner)return privateReply(i,'⛔ Impossible de retirer les droits du compte propriétaire Esty.');
+  await store.removeAdmin(guild,user.id);
+  return privateReply(i,`✅ <@${user.id}> n’a plus les droits d’animation Don Juan. Son inscription éventuelle comme prétendant, ses MP et son score sont conservés.`);
+ }
  if(sub==='reinitialiser'){
   if(i.user.id!==owner)return privateReply(i,'Esty seule peut réinitialiser le jeu.');
   if(i.options.getString('confirmation')!=='EFFACER')return privateReply(i,'⛔ Rien effacé. Saisis EFFACER exactement.');
@@ -137,6 +165,19 @@ async function handleCommand(i){
   await store.reset(guild);return privateReply(i,'🧹 Jeu Don Juan réinitialisé. Les dossiers des Problèmes d’Esty et les admins Don Juan restent intacts.');
  }
  let s=await store.session(guild);
+ if(sub==='juge-ajouter'){
+  if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty peut s’inscrire comme juge organisatrice.');
+  const user=i.options.getUser('membre',true);
+  if(user.id!==owner)return privateReply(i,'🔒 Cette commande est réservée à ton propre compte Esty.');
+  if(!['registrations','presentations','presentation_vote'].includes(s.phase))
+   return privateReply(i,'⏳ Inscription de la juge organisatrice uniquement pendant les inscriptions ou les présentations, avant la fermeture du premier vote. Aucune donnée n’a été modifiée.');
+  const existing=await store.entry(guild,user.id);
+  if(existing?.kind==='candidate')return privateReply(i,'⛔ Tu es déjà inscrite comme prétendante. Aucune inscription n’a été modifiée.');
+  if(existing?.kind==='judge')return privateReply(i,'✅ Tu es déjà inscrite comme juge ! Vérifie les accès au salon du jury et le rôle si nécessaire.');
+  await store.upsertEntry(guild,user.id,'judge');
+  if(s.judge_role)await judgeRole(user.id,s.judge_role,true);
+  return privateReply(i,`👑 Esty ajoutée comme juge ! Tu peux voter et poser tes questions. ${s.judge_role?'Vérifie que le rôle juge a bien été attribué et que tu vois le salon privé.':'⚠️ Aucun rôle juge configuré : utilise /donjuan role-juges pour l’accès au salon.'} Les prétendants, leurs numéros, MP et présentations restent inchangés.`);
+ }
  if(sub==='salon'){
   const ch=i.options.getChannel('salon',true);
   if(ch.permissionsFor(i.guild.roles.everyone)?.has('ViewChannel')) return privateReply(i,'🔒 Ce salon est visible par @everyone. Ferme d’abord l’accès aux non-juges dans les permissions Discord pour protéger l’anonymat.');
@@ -165,6 +206,9 @@ async function handleCommand(i){
   else if(/^\d{17,22}$/.test(value))msgId=value;
   else return privateReply(i,'Colle le lien du message Discord (ou son ID), pas le texte.');
   const ch=await bot.channels.fetch(channel),msg=await ch.messages.fetch(msgId);
+  // Ajoute les réactions si l'annonce ne les comporte pas encore.
+  await msg.react('👑').catch(e=>console.warn('Réaction juge non ajoutée',e.message));
+  await msg.react('😏').catch(e=>console.warn('Réaction prétendant non ajoutée',e.message));
   await store.updateSession(guild,{phase:'registrations',announce_channel:channel,announce_message:msg.id,round_no:0});
   await backfill(msg);
   return privateReply(i,`✅ Inscriptions ouvertes sur le message ${msg.id}. Réactions 👑 et 😏 prises en compte, y compris celles déjà posées. /donjuan participants pour vérifier.`);
@@ -214,7 +258,6 @@ async function handleCommand(i){
   if(qs.length<2)return privateReply(i,'Il faut au moins deux réponses pour lancer un vote. Utilise /donjuan rappels et attends les réponses.');
   if(qs.length>10)return privateReply(i,'Maximum 10 réponses par round pour le vote à réactions numérotées. Contacte Esty pour répartir les questions.');
   await i.deferReply({flags:FLAG});
-  if(qs.length>25)throw Error('Trop de réponses (>25) pour un seul vote. Prévois un maximum de 25 juges par round.');
   await judgePost(s,`# 👑 Don Juan — Réponses du round ${s.round_no}`);
   for(const x of qs)await judgePost(s,`**Réponse #${x.id} — Candidat #${x.number}**\n**Question :** ${x.question}\n**Réponse :** ${x.answer}`);
   const opts=qs.slice(0,10).map(x=>({label:`Réponse #${x.id} · Candidat #${x.number}`.slice(0,100),value:String(x.id)}));
@@ -229,6 +272,11 @@ async function handleCommand(i){
   await i.deferReply({flags:FLAG});
   const result=await store.tally(guild,s.round_no,kind,s.phase);
   if(!result)return privateReply(i,'Vote déjà fermé ou phase modifiée.');
+  if(s.vote_message&&s.vote_channel){
+    try{const ch=await bot.channels.fetch(s.vote_channel),m=await ch.messages.fetch(s.vote_message);
+      await m.edit({content:(m.content||'Vote')+'\n\n🔒 **Votes clos.**',components:[]});
+    }catch(e){console.warn('Impossible de désactiver le vote',e.message);}
+  }
   const c=await store.entries(guild,'candidate',true);
   await judgePost(s,`# 📊 Classement provisoire après ${kind==='presentation'?'les présentations':`le round ${s.round_no}`}\n👥 ${result.nb} juge(s) ont voté.\n\n${anonScores(c)}\n\n🎤 L’animateur choisit quand lancer la suite.`);
   return privateReply(i,'✅ Votes comptés, scores attribués et classement publié. /donjuan questions ou /donjuan eliminer.');
