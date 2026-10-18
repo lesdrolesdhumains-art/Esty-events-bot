@@ -8,6 +8,7 @@ const {
  GatewayIntentBits,Partials,MessageFlags
 }=require('discord.js');
 const store=require('./donjuan-db');
+const {pool}=require('./db'); // Utilise la même connexion Neon que les autres jeux.
 let bot, guild, owner;
 const VOTE_EMOJI=['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 const FLAG=MessageFlags.Ephemeral;
@@ -16,6 +17,7 @@ const command = new SlashCommandBuilder().setName('donjuan').setDescription('�
  .addSubcommand(s=>s.setName('admin').setDescription('Autoriser Tropi à piloter le jeu (Esty seule)').addUserOption(o=>o.setName('membre').setDescription('Animateur autorisé').setRequired(true)))
  .addSubcommand(s=>s.setName('admin-retirer').setDescription('Retirer les droits d’animateur à un prétendant (Esty seule)').addUserOption(o=>o.setName('membre').setDescription('Personne à retirer des admins').setRequired(true)))
  .addSubcommand(s=>s.setName('juge-ajouter').setDescription('Inscrire Esty comme juge même après la clôture des inscriptions').addUserOption(o=>o.setName('membre').setDescription('Sélectionne ton propre compte Esty').setRequired(true)))
+ .addSubcommand(s=>s.setName('pretendant-ajouter').setDescription('Ajouter un prétendant sans changer les numéros déjà attribués (Esty seule)').addUserOption(o=>o.setName('membre').setDescription('Nouveau prétendant à inscrire').setRequired(true)))
  .addSubcommand(s=>s.setName('role').setDescription('Choisir le rôle du futur Don Juan').addRoleOption(o=>o.setName('role').setDescription('Rôle Discord à attribuer').setRequired(true)))
  .addSubcommand(s=>s.setName('role-juges').setDescription('Rôle donné automatiquement aux juges inscrites').addRoleOption(o=>o.setName('role').setDescription('Rôle Discord des juges').setRequired(true)))
  .addSubcommand(s=>s.setName('inscriptions').setDescription('Lier l’annonce existante et ouvrir les inscriptions').addStringOption(o=>o.setName('message').setDescription('Lien ou ID du message d’annonce Discord').setRequired(true)))
@@ -120,6 +122,32 @@ async function backfill(message){
   await saveReaction(userId,kind==='judge'?'👑':'😏',true);
  }
 }
+// Ajout tardif pendant les présentations : verrou transactionnel pour éviter
+// deux numéros identiques et pour ne jamais renuméroter un candidat existant.
+async function addCandidateDuringPresentations(userId){
+ const conn=await pool.connect();
+ try{
+  await conn.query('BEGIN');
+  const phaseResult=await conn.query('SELECT phase FROM dj_sessions WHERE guild_id=$1 FOR UPDATE',[guild]);
+  if(phaseResult.rows[0]?.phase!=='presentations'){
+   await conn.query('ROLLBACK');return {status:'phase'};
+  }
+  const found=await conn.query('SELECT kind,number FROM dj_users WHERE guild_id=$1 AND user_id=$2',[guild,userId]);
+  if(found.rows.length){
+   await conn.query('ROLLBACK');return {status:'existing',entry:found.rows[0]};
+  }
+  const stats=await conn.query("SELECT COUNT(*)::int AS total, COALESCE(MAX(number),0)::int AS last_number FROM dj_users WHERE guild_id=$1 AND kind='candidate'",[guild]);
+  const {total,last_number}=stats.rows[0];
+  if(total>=10 || last_number>=10){
+   await conn.query('ROLLBACK');return {status:'limit'};
+  }
+  const number=last_number+1;
+  await conn.query("INSERT INTO dj_users(guild_id,user_id,kind,number,active,score,presentation) VALUES($1,$2,'candidate',$3,TRUE,0,NULL)",[guild,userId,number]);
+  await conn.query('COMMIT');
+  return {status:'added',number};
+ }catch(e){await conn.query('ROLLBACK').catch(()=>{});throw e;}
+ finally{conn.release();}
+}
 async function sendPresentations(){
  const list=await store.entries(guild,'candidate',true);let count=0;
  for(const c of list)if(!c.presentation){if(await dmUser(c.user_id,'👑 **Don Juan du serveur**\nEnvoie ta présentation anonyme (1 200 caractères maximum). Seuls les juges verront ton texte, sous un numéro et sans ton pseudo.\nNe mets pas ton prénom, ton pseudo ni d’informations privées dans ton texte.',[rowButton('dj:present','Envoyer ma présentation')]))count++;}
@@ -177,6 +205,24 @@ async function handleCommand(i){
   await store.upsertEntry(guild,user.id,'judge');
   if(s.judge_role)await judgeRole(user.id,s.judge_role,true);
   return privateReply(i,`👑 Esty ajoutée comme juge ! Tu peux voter et poser tes questions. ${s.judge_role?'Vérifie que le rôle juge a bien été attribué et que tu vois le salon privé.':'⚠️ Aucun rôle juge configuré : utilise /donjuan role-juges pour l’accès au salon.'} Les prétendants, leurs numéros, MP et présentations restent inchangés.`);
+ }
+ if(sub==='pretendant-ajouter'){
+  if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty peut ajouter un prétendant manuellement.');
+  // Les présentations sont déjà envoyées : c'est à ce moment qu'on peut ajouter
+  // un candidat avec son numéro définitif, sans changer les autres.
+  if(s.phase!=='presentations')return privateReply(i,'⏳ Ajout possible uniquement pendant les présentations, avant leur publication et le premier vote. Aucune donnée modifiée.');
+  const user=i.options.getUser('membre',true);
+  if(user.bot)return privateReply(i,'⛔ Impossible d’inscrire un compte bot.');
+  if(user.id===owner)return privateReply(i,'👑 Ton compte Esty est prévu pour être juge, pas prétendant.');
+  await i.deferReply({flags:FLAG});
+  const result=await addCandidateDuringPresentations(user.id);
+  if(result.status==='phase')return privateReply(i,'⏳ Phase modifiée : le premier vote est peut-être déjà ouvert. Aucun participant ajouté.');
+  if(result.status==='limit')return privateReply(i,'⛔ 10 prétendants maximum dans cette version. Aucun participant ajouté.');
+  if(result.status==='existing')return privateReply(i,result.entry.kind==='candidate'
+    ?`✅ <@${user.id}> est déjà candidat #${result.entry.number}. Son inscription, ses points et sa présentation restent inchangés.`
+    :`⛔ <@${user.id}> est déjà inscrit comme juge. Aucun changement effectué.`);
+  const ok=await dmUser(user.id,'👑 **Don Juan du serveur**\nTu viens d’être inscrit comme nouveau prétendant ! Envoie ta présentation anonyme (1 200 caractères maximum). Les juges la verront sous ton numéro, sans ton pseudo. Évite les indices permettant de t’identifier.',[rowButton('dj:present','Envoyer ma présentation')]);
+  return privateReply(i,`✅ <@${user.id}> ajouté comme **Candidat #${result.number}**. Les autres numéros, scores, MP et présentations sont conservés. ${ok?'💌 Son formulaire de présentation vient de lui être envoyé en MP.':'⚠️ Son MP a été refusé. Demande-lui d’autoriser les MP puis utilise /donjuan rappels.'}`);
  }
  if(sub==='salon'){
   const ch=i.options.getChannel('salon',true);
