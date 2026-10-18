@@ -1,0 +1,7 @@
+node_modules/
+• env
+*.1og
+*. db
+*. db-*
+backups/
+• DS_Store
