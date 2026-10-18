@@ -1,0 +1,17 @@
+{
+  "name": "esty-events-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot d'animations semi-automatique pour Les Droles d'Humains",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "check": "node --check bot.js && node --check db.js && node --check commands.js && node --check index.js"
+  },
+  "engines": { "node": ">=20.11.0" },
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.6.1",
+    "pg": "^8.16.0"
+  }
+}
