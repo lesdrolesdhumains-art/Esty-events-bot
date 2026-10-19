@@ -44,6 +44,7 @@ const command = new SlashCommandBuilder().setName('donjuan').setDescription('�
  .addSubcommand(s=>s.setName('reinitialiser').setDescription('Effacer les données Don Juan pour un nouveau test').addStringOption(o=>o.setName('confirmation').setDescription('Écrire exactement EFFACER').setRequired(true)))
  .addSubcommandGroup(g=>g.setName('epreuves').setDescription('👑 Sélection, défis et finale — classement indépendant')
   .addSubcommand(x=>x.setName('selection').setDescription('Préparer ou confirmer l’élimination de 3 candidats (10→7)').addStringOption(o=>o.setName('numeros').setDescription('Seulement pour départager une égalité : 2,5,8')).addStringOption(o=>o.setName('confirmation').setDescription('Écrire ELIMINER pour confirmer')))
+  .addSubcommand(x=>x.setName('valider-selection').setDescription('Reconnaître 7 qualifiés après éliminations déjà faites, SANS éliminer').addStringOption(o=>o.setName('confirmation').setDescription('Écrire VALIDER après la prévisualisation')))
   .addSubcommand(x=>x.setName('lancer').setDescription('Lancer le prochain défi commun et envoyer les MP'))
   .addSubcommand(x=>x.setName('suivi').setDescription('Réponses et notes reçues (privé)'))
   .addSubcommand(x=>x.setName('rappels').setDescription('Relancer les candidats sans texte, ou rappeler les juges'))
@@ -350,6 +351,14 @@ async function handleStageCommand(i){
  // Même si une personne reste accidentellement dans la table des admins, SEULE Esty pilote les éliminations.
  if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty pilote les épreuves finales. Les juges notent par les boutons du salon privé.');
  const sub=i.options.getSubcommand(),sess=await store.session(guild);
+ if(sub==='valider-selection'){
+  const confirmed=i.options.getString('confirmation')==='VALIDER';
+  const r=await store.adoptSelection(guild,confirmed);
+  if(r.already)return privateReply(i,'✅ La sélection est déjà enregistrée. Aucun candidat modifié. Tu peux lancer `/donjuan epreuves lancer` si le défi du poète n’a pas encore commencé.');
+  const status=`👑 **${r.active} candidats toujours qualifiés** ; ${r.eliminated} éliminé(s) déjà enregistrés.\nQualifiés : ${r.numbers.map(n=>'#'+n).join(', ')}.`;
+  if(!confirmed)return privateReply(i,`🔒 **VÉRIFICATION SANS CHANGEMENT**\n${status}\n\nPour reconnaître cette sélection sans éliminer personne, utilise \`/donjuan epreuves valider-selection confirmation:VALIDER\`.`);
+  return privateReply(i,`✅ **Sélection déjà effectuée : validée !**\n${status}\nAucune inscription, présentation, réponse ni ancien score n’a été modifié. Lance maintenant \`/donjuan epreuves lancer\` pour envoyer le défi du poète aux 7 qualifiés.`);
+ }
  if(sub==='selection'){
   if(sess.phase!=='between')return privateReply(i,'⛔ Termine d’abord le vote actuel avec /donjuan vote-fermer. Rien n’a été modifié.');
   const choice=store.parseNumbers(i.options.getString('numeros'));

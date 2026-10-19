@@ -178,6 +178,35 @@ async function latestStage(guild){return one('SELECT * FROM dj_stages WHERE guil
 async function stage(guild,n){return one('SELECT * FROM dj_stages WHERE guild_id=$1 AND stage_no=$2',[guild,n]);}
 async function stageAnswers(guild,n){return (await q(`SELECT a.*,u.number,u.active FROM dj_stage_answers a JOIN dj_users u ON u.guild_id=a.guild_id AND u.user_id=a.candidate_id WHERE a.guild_id=$1 AND a.stage_no=$2 ORDER BY u.number`,[guild,n])).rows;}
 async function stageRatings(guild,n){return (await q('SELECT * FROM dj_stage_ratings WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows;}
+// Transition de secours : des éliminations ont été effectuées avec l'ancienne commande.
+// N'effectue AUCUNE mise à jour de dj_users et n'efface AUCUNE réponse / note.
+// Seule la ligne stage 0 est ajoutée, puis la phase passe de between à challenges.
+async function adoptSelection(guild,commit=false){
+ const c=await pool.connect();
+ try{
+  await c.query('BEGIN');
+  const sess=(await c.query('SELECT phase FROM dj_sessions WHERE guild_id=$1 FOR UPDATE',[guild])).rows[0];
+  if(!sess)throw Error('Partie Don Juan introuvable.');
+  const existing=(await c.query('SELECT stage_no,state FROM dj_stages WHERE guild_id=$1 ORDER BY stage_no DESC LIMIT 1',[guild])).rows[0];
+  if(existing){
+   if(sess.phase==='challenges'&&existing.stage_no===0&&existing.state==='eliminated'){
+    await c.query('COMMIT');return {already:true};
+   }
+   throw Error('Une épreuve est déjà enregistrée ; reprise manuelle bloquée pour éviter de modifier une partie en cours.');
+  }
+  if(sess.phase!=='between')throw Error('Le dernier vote doit être terminé (phase « entre deux manches »). Consulte /donjuan statut et /donjuan suivi avant de continuer.');
+  const players=(await c.query("SELECT user_id,number,active FROM dj_users WHERE guild_id=$1 AND kind='candidate' ORDER BY number FOR UPDATE",[guild])).rows;
+  const active=players.filter(p=>p.active===true),eliminated=players.length-active.length;
+  if(active.length!==7)throw Error(`Reprise impossible : il faut exactement 7 prétendants actifs, actuellement ${active.length}. Aucune donnée modifiée.`);
+  if(eliminated<3)throw Error(`Reprise impossible : seulement ${eliminated} élimination(s) constatée(s), résultat inattendu. Aucune donnée modifiée.`);
+  const result={already:false,active:active.length,eliminated,numbers:active.map(p=>Number(p.number))};
+  if(commit){
+   await c.query("INSERT INTO dj_stages(guild_id,stage_no,state,prompt,active_count) VALUES($1,0,'eliminated','Qualification déjà effectuée via anciennes commandes ; aucune nouvelle élimination', $2)",[guild,players.length]);
+   await c.query("UPDATE dj_sessions SET phase='challenges',updated_at=NOW() WHERE guild_id=$1 AND phase='between'",[guild]);
+  }
+  await c.query('COMMIT');return result;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
 async function selection(guild,numberList,commit=false){
  const c=await pool.connect();try{
   await c.query('BEGIN');
@@ -306,4 +335,4 @@ async function reset(guild){
  await c.query("UPDATE dj_sessions SET phase='draft',announce_channel=NULL,announce_message=NULL,round_no=0,deadline=NULL,vote_message=NULL,vote_channel=NULL,vote_kind=NULL,vote_choices=NULL WHERE guild_id=$1",[guild]);
  await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
-module.exports={init,q,one,session,updateSession,phaseTransition,isAdmin,addAdmin,removeAdmin,entry,upsertEntry,removeEntry,entries,assignNumbers,savePresentation,addQuestion,question,saveAnswer,questions,vote,unvote,votes,tally,eliminate,reset,parseNumbers,bottomCut,latestStage,stage,stageAnswers,stageRatings,stageCandidates,selection,startStage,saveStageAnswer,publishStage,stageRate,calculateStageScores,stageStats,closeStage,finishStage};
+module.exports={init,q,one,session,updateSession,phaseTransition,isAdmin,addAdmin,removeAdmin,entry,upsertEntry,removeEntry,entries,assignNumbers,savePresentation,addQuestion,question,saveAnswer,questions,vote,unvote,votes,tally,eliminate,reset,parseNumbers,bottomCut,latestStage,stage,stageAnswers,stageRatings,stageCandidates,selection,adoptSelection,startStage,saveStageAnswer,publishStage,stageRate,calculateStageScores,stageStats,closeStage,finishStage};
