@@ -42,6 +42,9 @@ async function init() {
    judge_id TEXT NOT NULL, choice TEXT NOT NULL,
    PRIMARY KEY(guild_id,round_no,kind,judge_id)
  );
+ -- Ancien verrou : UNIQUE(guild_id,round_no,judge_id), donc 1 seule question par juge.
+ -- Retirer uniquement CETTE contrainte, sans effacer ou modifier les questions existantes.
+ ALTER TABLE dj_questions DROP CONSTRAINT IF EXISTS dj_questions_guild_id_round_no_judge_id_key;
  ALTER TABLE dj_sessions ADD COLUMN IF NOT EXISTS judge_role TEXT;
  `);
 }
@@ -86,7 +89,26 @@ async function assignNumbers(guild){
  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
 async function savePresentation(guild,user,text){return one("UPDATE dj_users SET presentation=$3 WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE RETURNING *",[guild,user,text]);}
-async function addQuestion(guild,round,judge,candidate,question){return one(`INSERT INTO dj_questions(guild_id,round_no,judge_id,candidate_id,question) VALUES($1,$2,$3,$4,$5) RETURNING *`,[guild,round,judge,candidate,question]);}
+async function addQuestion(guild,round,judge,candidate,question){
+ // Chaque soumission est atomique : le verrou de session empêche de dépasser
+ // 3 questions en cas de double clic ou de fermer la phase entre 2 requêtes.
+ const c=await pool.connect();
+ try{
+  await c.query('BEGIN');
+  const state=(await c.query('SELECT phase,round_no FROM dj_sessions WHERE guild_id=$1 FOR UPDATE',[guild])).rows[0];
+  if(!state||state.phase!=='questions'||state.round_no!==round){const e=Error('Round non ouvert');e.code='DJ_PHASE_CHANGED';throw e;}
+  const n=Number((await c.query('SELECT COUNT(*)::int AS n FROM dj_questions WHERE guild_id=$1 AND round_no=$2 AND judge_id=$3',[guild,round,judge])).rows[0].n);
+  if(n>=3){const e=Error('Limite de trois questions par juge');e.code='DJ_JUDGE_LIMIT';throw e;}
+  const total=Number((await c.query('SELECT COUNT(*)::int AS n FROM dj_questions WHERE guild_id=$1 AND round_no=$2',[guild,round])).rows[0].n);
+  if(total>=125){const e=Error('Limite technique des menus de vote');e.code='DJ_ROUND_LIMIT';throw e;}
+  const eligible=(await c.query("SELECT 1 FROM dj_users WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE",[guild,candidate])).rowCount>0;
+  if(!eligible){const e=Error('Candidat inactif');e.code='DJ_INVALID_CANDIDATE';throw e;}
+  const inserted=(await c.query('INSERT INTO dj_questions(guild_id,round_no,judge_id,candidate_id,question) VALUES($1,$2,$3,$4,$5) RETURNING *',[guild,round,judge,candidate,question])).rows[0];
+  await c.query('COMMIT');
+  return {...inserted,judge_question_count:n+1};
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}
+ finally{c.release();}
+}
 async function question(guild,id){return one('SELECT * FROM dj_questions WHERE guild_id=$1 AND id=$2',[guild,id]);}
 async function saveAnswer(guild,id,candidate,text){return one('UPDATE dj_questions SET answer=$4,answered_at=NOW() WHERE guild_id=$1 AND id=$2 AND candidate_id=$3 AND answer IS NULL RETURNING *',[guild,id,candidate,text]);}
 async function questions(guild,round){return (await q('SELECT q.*,u.number FROM dj_questions q JOIN dj_users u ON u.guild_id=q.guild_id AND u.user_id=q.candidate_id WHERE q.guild_id=$1 AND q.round_no=$2 ORDER BY q.id',[guild,round])).rows;}

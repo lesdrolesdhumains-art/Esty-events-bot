@@ -12,7 +12,10 @@ const {pool}=require('./db'); // Utilise la même connexion Neon que les autres 
 let bot, guild, owner;
 const VOTE_EMOJI=['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
 const MAX_PRETENDANTS=15; // Jusqu’à 15 candidats ; au-delà de 10 choix, vote par menu Discord.
-const MAX_REPONSES_PAR_ROUND=15;
+// Discord accepte jusqu'à cinq menus de 25 choix par message.
+// Chaque juge peut poser TROIS questions, indépendamment des réponses reçues.
+const MAX_QUESTIONS_PAR_JUGE=3;
+const MAX_REPONSES_PAR_ROUND=125;
 const FLAG=MessageFlags.Ephemeral;
 const command = new SlashCommandBuilder().setName('donjuan').setDescription('👑 Animation Don Juan du serveur (Tropi)')
  .addSubcommand(s=>s.setName('salon').setDescription('Définir le salon privé des juges').addChannelOption(o=>o.setName('salon').setDescription('Salon réservé aux juges').addChannelTypes(ChannelType.GuildText).setRequired(true)))
@@ -30,7 +33,7 @@ const command = new SlashCommandBuilder().setName('donjuan').setDescription('�
  .addSubcommand(s=>s.setName('identites').setDescription('Voir en privé les pseudos derrière les numéros (Esty seule)'))
  .addSubcommand(s=>s.setName('presentations').setDescription('Envoyer le formulaire de présentation en MP'))
  .addSubcommand(s=>s.setName('presentations-publier').setDescription('Publier anonymement les présentations et ouvrir le vote'))
- .addSubcommand(s=>s.setName('questions').setDescription('Ouvrir un round de questions en MP'))
+ .addSubcommand(s=>s.setName('questions').setDescription('Ouvrir le round OU relancer les juges sans le fermer'))
  .addSubcommand(s=>s.setName('questions-fermer').setDescription('Fermer les nouvelles questions (réponses encore acceptées)'))
  .addSubcommand(s=>s.setName('reponses-publier').setDescription('Publier les réponses reçues et ouvrir le vote'))
  .addSubcommand(s=>s.setName('vote-fermer').setDescription('Clôturer le vote, compter les voix et attribuer les points'))
@@ -159,20 +162,45 @@ async function sendPresentations(){
  for(const c of list)if(!c.presentation){if(await dmUser(c.user_id,'👑 **Don Juan du serveur**\nEnvoie ta présentation anonyme (1 200 caractères maximum). Seuls les juges verront ton texte, sous un numéro et sans ton pseudo.\nNe mets pas ton prénom, ton pseudo ni d’informations privées dans ton texte.',[rowButton('dj:present','Envoyer ma présentation')]))count++;}
  return count;
 }
-async function sendQuestionForms(round){let count=0;for(const j of await store.entries(guild,'judge'))if(await dmUser(j.user_id,`👑 **Don Juan — Round ${round}**\nTu peux poser UNE question à un candidat actif. Tu recevras les réponses dans le salon des juges.`,[rowButton(`dj:ask:${round}`,'Poser ma question')]))count++;return count;}
+async function sendQuestionForms(round){
+ let count=0;
+ const submitted=await store.questions(guild,round);
+ const used=new Map();for(const q of submitted)used.set(q.judge_id,(used.get(q.judge_id)||0)+1);
+ for(const j of await store.entries(guild,'judge')){
+  const n=used.get(j.user_id)||0;
+  if(n>=MAX_QUESTIONS_PAR_JUGE)continue;
+  if(await dmUser(j.user_id,`👑 **Don Juan — Round ${round}**\nTu peux poser **jusqu'à 3 questions** pendant ce même round (déjà envoyées : **${n}/3**). Choisis un candidat actif à chaque fois.\n\nRéutilise ce bouton pour chaque nouvelle question, jusqu'à 3 au total. Les réponses arriveront plus tard dans le salon des juges.`,[rowButton(`dj:ask:${round}`,'Poser une question')]))count++;
+ }
+ return count;
+}
 async function sendMissingAnswers(round){let count=0;for(const qu of await store.questions(guild,round))if(!qu.answer){if(await dmUser(qu.candidate_id,`📩 Question pour **Candidat #${qu.number}** :\n${qu.question}\n\nTa réponse sera publiée anonymement aux juges.`,[rowButton(`dj:answer:${qu.id}`,'Répondre')]))count++;}return count;}
 async function openVote(s,kind,options,title){
- if(options.length<1||options.length>MAX_REPONSES_PAR_ROUND)throw Error('Entre 1 et 15 choix sont acceptés.');
- const menu=new StringSelectMenuBuilder().setCustomId(`dj:vote:${kind}:${s.round_no}`).setPlaceholder('Choisis une seule réponse').addOptions(options);
- const menuSeulement=options.length>VOTE_EMOJI.length;
- const lines=options.map((o,j)=>menuSeulement?`${j+1}. ${o.label}`:`${VOTE_EMOJI[j]} ${o.label}`);
- const consigne=menuSeulement
-  ?'🗳️ **Plus de 10 choix : vote uniquement avec le menu déroulant ci-dessous.** Aucune réaction ne compte pour ce scrutin.'
-  :'🗳️ Réagis avec un numéro ou utilise le menu déroulant ci-dessous.';
- const msg=await judgePost(s,title+'\n\n'+lines.join('\n')+'\n\n🔒 Seules les juges inscrites peuvent voter. **Un vote par juge**, modifiable avant clôture.\n'+consigne,[new ActionRowBuilder().addComponents(menu)]);
+ if(options.length<1||options.length>MAX_REPONSES_PAR_ROUND)throw Error('Entre 1 et 125 choix sont acceptés pour ce vote.');
+ const rows=[];
+ // 1 menu = 25 choix ; Discord permet 5 lignes de composants maximum.
+ for(let start=0;start<options.length;start+=25){
+  const slice=options.slice(start,start+25),page=1+Math.floor(start/25);
+  const menu=new StringSelectMenuBuilder()
+   .setCustomId(`dj:vote:${kind}:${s.round_no}:${page}`)
+   .setPlaceholder(`Réponses ${start+1} à ${start+slice.length} — choisir 1`)
+   .addOptions(slice);
+  rows.push(new ActionRowBuilder().addComponents(menu));
+ }
+ const reactionsEnabled=options.length<=VOTE_EMOJI.length;
+ const lines=options.length<=20
+  ? options.map((o,j)=>reactionsEnabled?`${VOTE_EMOJI[j]} ${o.label}`:`${j+1}. ${o.label}`)
+  : [];
+ const consigne=reactionsEnabled
+  ? '🗳️ Vote par réaction numérotée ou menu déroulant.'
+  : `🗳️ **Vote uniquement par menu.** ${rows.length>1?'Parcours les '+rows.length+' menus si nécessaire.':''} Les réactions ne sont pas comptées.`;
+ const txt=title+'\n\n'+(lines.length?lines.join('\n')+'\n\n':`${options.length} réponses au choix dans les menus ci-dessous.\n\n`)
+  +'🔒 Seules les juges inscrites votent. **Un seul vote par juge**, modifiable avant clôture.\n'+consigne;
+ if(txt.length>2000)throw Error('Message de vote trop long.');
+ const msg=await judgePost(s,txt,rows);
  await store.updateSession(guild,{vote_message:msg.id,vote_channel:msg.channelId,vote_kind:kind,vote_choices:JSON.stringify(options.map(o=>o.value))});
- if(!menuSeulement){for(let j=0;j<options.length;j++)await msg.react(VOTE_EMOJI[j]).catch(e=>console.warn('Ajout réaction impossible',e.message));}
+ if(reactionsEnabled){for(let j=0;j<options.length;j++)await msg.react(VOTE_EMOJI[j]).catch(e=>console.warn('Ajout réaction impossible',e.message));}
 }
+
 function anonScores(players){return players.slice().sort((a,b)=>b.score-a.score||a.number-b.number).map(p=>`#${p.number} — ${p.score} point(s)${p.active?'':' · éliminé'}`).join('\n');}
 async function showParticipants(i){
  const c=await store.entries(guild,'candidate'),j=await store.entries(guild,'judge');
@@ -227,11 +255,12 @@ async function showProgress(i,s){
  sections.push(`👑 **JUGES — VOTE DES PRÉSENTATIONS**\n${votePresLaunched?`🗳️ ${pVoters.size}/${judges.length} votes enregistrés${pVoteOpen?' · vote ouvert':' · vote clos'}`:'🕒 Vote non ouvert'}\n${preVoteLines.join('\n')||'_Aucune juge inscrite_'}`);
  if(s.round_no>0){
   const qs=await store.questions(guild,s.round_no);
-  const byJudge=new Map(qs.map(q=>[q.judge_id,q]));
+  const byJudge=new Map();
+  for(const q of qs){if(!byJudge.has(q.judge_id))byJudge.set(q.judge_id,[]);byJudge.get(q.judge_id).push(q);}
   const questionsOpen=s.phase==='questions';
   const questionsLaunched=['questions','answers','round_vote','between','ended'].includes(s.phase);
   const sent=judges.filter(j=>byJudge.has(j.user_id)).length;
-  sections.push(`❓ **JUGES — QUESTIONS DE LA MANCHE ${s.round_no}**\n✉️ ${sent}/${judges.length} juges ont posé une question${questionsOpen?' · envoi ouvert':questionsLaunched?' · envoi fermé':''}\n${judges.map(j=>{const q=byJudge.get(j.user_id);return `${q?'✅':questionsOpen?'⏳':'❌'} <@${j.user_id}>${q?` → candidat #${q.number} · question #${q.id}`:questionsOpen?' · question attendue':' · aucune question envoyée'}`;}).join('\n')||'_Aucune juge inscrite_'}`);
+  sections.push(`❓ **JUGES — QUESTIONS DE LA MANCHE ${s.round_no}**\n✉️ ${qs.length} question(s) envoyée(s) par ${sent}/${judges.length} juges${questionsOpen?' · envoi ouvert':questionsLaunched?' · envoi fermé':''}\n${judges.map(j=>{const items=byJudge.get(j.user_id)||[];return `${items.length===MAX_QUESTIONS_PAR_JUGE?'✅':questionsOpen?'⏳':items.length?'✅':'❌'} <@${j.user_id}> · **${items.length}/3 questions**${items.length?` → ${items.map(q=>`#${q.number} (Q${q.id})`).join(', ')}`:''}`;}).join('\n')||'_Aucune juge inscrite_'}`);
   const byCandidate=new Map();
   for(const q of qs){const a=byCandidate.get(q.candidate_id)||{total:0,answered:0};a.total++;if(q.answer)a.answered++;byCandidate.set(q.candidate_id,a);}
   const answered=qs.filter(q=>Boolean(q.answer)).length;
@@ -394,10 +423,17 @@ async function handleCommand(i){
   return privateReply(i,`✅ ${ready.length} présentation(s) publiées anonymement ; vote ouvert aux juges.`);
  }
  if(sub==='questions'){
+  if(s.phase==='questions'){
+   // Ne change PAS de manche : on renvoie seulement le bouton aux juges qui ont encore des questions à poser.
+   await i.deferReply({flags:FLAG});const n=await sendQuestionForms(s.round_no);
+   return privateReply(i,`📩 Round ${s.round_no} toujours ouvert et inchangé : ${n} juge(s) relancée(s) avec les questions encore disponibles (3 maximum par juge). Aucune question ni réponse perdue.`);
+  }
   if(s.phase!=='between')return privateReply(i,'Clôture d’abord le vote précédent.');
-  const next=s.round_no+1;await store.phaseTransition(guild,'between','questions',{round_no:next});
+  const next=s.round_no+1;
+  const updated=await store.phaseTransition(guild,'between','questions',{round_no:next});
+  if(!updated)return privateReply(i,'Le round a déjà changé, recommence /donjuan statut.');
   await i.deferReply({flags:FLAG});const n=await sendQuestionForms(next);
-  return privateReply(i,`📩 Round ${next} lancé : ${n} juges contactées en MP. Une question par juge et par round.`);
+  return privateReply(i,`📩 Round ${next} lancé : ${n} juges contactées en MP. Jusqu’à 3 questions par juge pendant ce round.`);
  }
  if(sub==='questions-fermer'){
   if(s.phase!=='questions')return privateReply(i,'Aucune réception de questions ouverte.');
@@ -409,11 +445,11 @@ async function handleCommand(i){
   if(!s.judges_channel)return privateReply(i,'Configure d’abord /donjuan salon.');
   const qs=(await store.questions(guild,s.round_no)).filter(x=>x.answer);
   if(qs.length<2)return privateReply(i,'Il faut au moins deux réponses pour lancer un vote. Utilise /donjuan rappels et attends les réponses.');
-  if(qs.length>MAX_REPONSES_PAR_ROUND)return privateReply(i,'Maximum 15 réponses par round pour ce vote.');
+  if(qs.length>MAX_REPONSES_PAR_ROUND)return privateReply(i,'Maximum 125 réponses par round pour les menus Discord.');
   await i.deferReply({flags:FLAG});
   await judgePost(s,`# 👑 Don Juan — Réponses du round ${s.round_no}`);
   for(const x of qs)await judgePost(s,`**Réponse #${x.id} — Candidat #${x.number}**\n**Question :** ${x.question}\n**Réponse :** ${x.answer}`);
-  const opts=qs.slice(0,MAX_REPONSES_PAR_ROUND).map(x=>({label:`Réponse #${x.id} · Candidat #${x.number}`.slice(0,100),value:String(x.id)}));
+  const opts=qs.map(x=>({label:`Réponse #${x.id} · Candidat #${x.number}`.slice(0,100),value:String(x.id)}));
   
   await openVote(s,'question',opts,`# 🗳️ Vote du round ${s.round_no} — meilleure réponse`);
   await store.phaseTransition(guild,s.phase,'round_vote');
@@ -479,6 +515,8 @@ async function handleComponent(i){
  if(cid.startsWith('dj:ask:')&&i.isButton()){
   const round=Number(cid.split(':')[2]),s=await store.session(guild),member=await store.entry(guild,i.user.id);
   if(s.phase!=='questions'||s.round_no!==round||member?.kind!=='judge')return dmReply(i,'Questions fermées ou tu n’es pas juge inscrite.');
+  const alreadyAsked=(await store.questions(guild,round)).filter(q=>q.judge_id===i.user.id).length;
+  if(alreadyAsked>=MAX_QUESTIONS_PAR_JUGE)return dmReply(i,'✅ Tu as déjà envoyé tes 3 questions pour ce round. Merci !');
   return i.showModal(modal(`dj:submit:ask:${round}`,'Question anonyme',[{id:'number',label:'Numéro candidat (ex: 2)',max:2},{id:'question',label:'Ma question',long:true,max:500}]));
  }
  if(cid.startsWith('dj:submit:ask:')&&i.isModalSubmit()){
@@ -488,11 +526,10 @@ async function handleComponent(i){
   const candidate=(await store.entries(guild,'candidate',true)).find(c=>c.number===number);
   if(!candidate||!q)return dmReply(i,'Numéro invalide ou question vide.');
   try{
-   if((await store.questions(guild,round)).length>=MAX_REPONSES_PAR_ROUND)return dmReply(i,'Maximum 15 questions pour ce round. Préviens Esty.');
    const qu=await store.addQuestion(guild,round,i.user.id,candidate.user_id,q);
    const ok=await dmUser(candidate.user_id,`📩 **Don Juan — Question pour Candidat #${number}**\n${q}\n\nRéponds anonymement avec le bouton ci-dessous.`,[rowButton(`dj:answer:${qu.id}`,'Répondre à cette question')]);
-   return dmReply(i,`✅ Question enregistrée pour Candidat #${number}.${ok?'':' ⚠️ Son MP est bloqué, Tropi pourra le relancer.'}`);
-  }catch(e){if(e.code==='23505')return dmReply(i,'Tu as déjà posé une question pendant ce round.');throw e;}
+   return dmReply(i,`✅ Question **${qu.judge_question_count}/3** enregistrée pour Candidat #${number}.${ok?'':' ⚠️ Son MP est bloqué ; Esty pourra le relancer.'} Pour en poser une autre, réutilise le bouton du MP initial.`);
+  }catch(e){if(e.code==='DJ_JUDGE_LIMIT')return dmReply(i,'✅ Tu as déjà posé tes 3 questions dans ce round.');if(e.code==='DJ_ROUND_LIMIT')return dmReply(i,'⛔ Capacité du vote atteinte pour ce round. Contacte Esty.');if(e.code==='DJ_PHASE_CHANGED')return dmReply(i,'⏳ Le round n’accepte plus de questions.');if(e.code==='DJ_INVALID_CANDIDATE')return dmReply(i,'⛔ Ce candidat n’est plus actif.');throw e;}
  }
  if(cid.startsWith('dj:answer:')&&i.isButton()){
   const id=Number(cid.split(':')[2]),q=await store.question(guild,id),s=await store.session(guild);
