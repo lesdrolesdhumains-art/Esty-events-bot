@@ -46,6 +46,29 @@ async function init() {
  -- Retirer uniquement CETTE contrainte, sans effacer ou modifier les questions existantes.
  ALTER TABLE dj_questions DROP CONSTRAINT IF EXISTS dj_questions_guild_id_round_no_judge_id_key;
  ALTER TABLE dj_sessions ADD COLUMN IF NOT EXISTS judge_role TEXT;
+ -- Épreuves supplémentaires isolées ; aucune modification des scores historiques.
+ CREATE TABLE IF NOT EXISTS dj_stages (
+  guild_id TEXT NOT NULL, stage_no INT NOT NULL CHECK(stage_no BETWEEN 0 AND 3),
+  state TEXT NOT NULL CHECK(state IN ('collect','published','closed','eliminated')),
+  prompt TEXT NOT NULL, active_count INT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(guild_id,stage_no)
+ );
+ CREATE TABLE IF NOT EXISTS dj_stage_participants (
+  guild_id TEXT NOT NULL, stage_no INT NOT NULL, candidate_id TEXT NOT NULL,
+  PRIMARY KEY(guild_id,stage_no,candidate_id)
+ );
+ CREATE TABLE IF NOT EXISTS dj_stage_answers (
+  guild_id TEXT NOT NULL, stage_no INT NOT NULL, candidate_id TEXT NOT NULL,
+  answer TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(guild_id,stage_no,candidate_id)
+ );
+ CREATE TABLE IF NOT EXISTS dj_stage_ratings (
+  guild_id TEXT NOT NULL, stage_no INT NOT NULL, judge_id TEXT NOT NULL,
+  candidate_id TEXT NOT NULL, grade INT NOT NULL CHECK(grade BETWEEN 0 AND 10),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(guild_id,stage_no,judge_id,candidate_id)
+ );
  `);
 }
 async function q(sql,params=[]) {return pool.query(sql,params);}
@@ -132,10 +155,155 @@ async function tally(guild,round,kind,fromPhase){
  }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
 async function eliminate(guild,user){return one("UPDATE dj_users SET active=FALSE WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE RETURNING *",[guild,user]);}
+// ================= SÉLECTION / ÉPREUVES SANS MODIFIER LE CLASSEMENT HISTORIQUE =================
+function bottomCut(rows, numberToEliminate, numbers=[]) {
+ const sorted=[...rows].sort((a,b)=>Number(a.points)-Number(b.points)||a.number-b.number);
+ if(sorted.length<=numberToEliminate)throw Error('Il faut conserver au moins un candidat.');
+ const threshold=Number(sorted[numberToEliminate-1].points);
+ const must=sorted.filter(x=>Number(x.points)<threshold);
+ const tied=sorted.filter(x=>Number(x.points)===threshold);
+ const seats=numberToEliminate-must.length;
+ if(numbers.length===0&&tied.length>seats){
+  const e=Error(`Égalité au seuil : ${tied.map(x=>'#'+x.number).join(', ')} (${threshold}). Il faut départager ces candidats avant confirmation.`);
+  e.code='DJ_CUTOFF_TIE';e.tied=tied;e.must=must;throw e;
+ }
+ const proposed=numbers.length ? sorted.filter(x=>numbers.includes(x.number)) : [...must,...tied.slice(0,seats)];
+ if(proposed.length!==numberToEliminate || new Set(numbers).size!==numbers.length || (numbers.length&&numbers.length!==numberToEliminate) || must.some(x=>!proposed.some(y=>y.user_id===x.user_id)) || proposed.some(x=>Number(x.points)>threshold)){
+  throw Error(`Sélection invalide : indique exactement ${numberToEliminate} numéros parmi les derniers, sans éliminer un candidat mieux classé.`);
+ }
+ return proposed;
+}
+function parseNumbers(input){if(!input)return [];if(!/^\d{1,2}(\s*,\s*\d{1,2})*$/.test(input.trim()))throw Error('Numéros attendus : exemple 2,5,8');return input.split(',').map(x=>Number(x.trim()));}
+async function latestStage(guild){return one('SELECT * FROM dj_stages WHERE guild_id=$1 ORDER BY stage_no DESC LIMIT 1',[guild]);}
+async function stage(guild,n){return one('SELECT * FROM dj_stages WHERE guild_id=$1 AND stage_no=$2',[guild,n]);}
+async function stageAnswers(guild,n){return (await q(`SELECT a.*,u.number,u.active FROM dj_stage_answers a JOIN dj_users u ON u.guild_id=a.guild_id AND u.user_id=a.candidate_id WHERE a.guild_id=$1 AND a.stage_no=$2 ORDER BY u.number`,[guild,n])).rows;}
+async function stageRatings(guild,n){return (await q('SELECT * FROM dj_stage_ratings WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows;}
+async function selection(guild,numberList,commit=false){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT phase FROM dj_sessions WHERE guild_id=$1 FOR UPDATE',[guild])).rows[0];
+  if(st?.phase!=='between')throw Error('Clôture d’abord le vote du round de questions avec /donjuan vote-fermer.');
+  const players=(await c.query("SELECT user_id,number,score AS points FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE ORDER BY number FOR UPDATE",[guild])).rows;
+  if(players.length!==10)throw Error(`Cette première sélection est prévue pour 10 candidats actifs (actuellement ${players.length}).`);
+  const chosen=bottomCut(players,3,numberList);
+  if(commit){
+   for(const p of chosen)await c.query("UPDATE dj_users SET active=FALSE WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE",[guild,p.user_id]);
+   await c.query("INSERT INTO dj_stages(guild_id,stage_no,state,prompt,active_count) VALUES($1,0,'eliminated','Sélection initiale sur le classement historique',10)",[guild]);
+   await c.query("UPDATE dj_sessions SET phase='challenges',updated_at=NOW() WHERE guild_id=$1",[guild]);
+  }
+  await c.query('COMMIT');return {chosen,players};
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function startStage(guild,n,prompt,expected){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const sess=(await c.query('SELECT phase FROM dj_sessions WHERE guild_id=$1 FOR UPDATE',[guild])).rows[0];
+  if(sess?.phase!=='challenges')throw Error('La sélection des 10 à 7 n’est pas encore terminée.');
+  const last=(await c.query('SELECT stage_no,state FROM dj_stages WHERE guild_id=$1 ORDER BY stage_no DESC LIMIT 1',[guild])).rows[0];
+  if(!last||last.stage_no!==n-1||last.state!=='eliminated')throw Error('Il faut terminer et appliquer les éliminations de l’épreuve précédente.');
+  const active=Number((await c.query("SELECT COUNT(*)::int AS count FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE",[guild])).rows[0].count);
+  if(active!==expected)throw Error(`Cette épreuve doit commencer avec ${expected} candidats actifs, et non ${active}.`);
+  const added=(await c.query("INSERT INTO dj_stages(guild_id,stage_no,state,prompt,active_count) VALUES($1,$2,'collect',$3,$4) RETURNING *",[guild,n,prompt,expected])).rows[0];
+  await c.query("INSERT INTO dj_stage_participants(guild_id,stage_no,candidate_id) SELECT guild_id,$2,user_id FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE",[guild,n]);
+  await c.query('COMMIT');return added;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function saveStageAnswer(guild,n,user,answer){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=$2 FOR UPDATE',[guild,n])).rows[0];
+  if(st?.state!=='collect')throw Error('La collecte des réponses est terminée.');
+  const exists=(await c.query("SELECT 1 FROM dj_users WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE",[guild,user])).rowCount>0;
+  if(!exists)throw Error('Tu ne participes pas à cette épreuve.');
+  await c.query(`INSERT INTO dj_stage_answers(guild_id,stage_no,candidate_id,answer) VALUES($1,$2,$3,$4)
+   ON CONFLICT(guild_id,stage_no,candidate_id) DO UPDATE SET answer=$4,updated_at=NOW()`,[guild,n,user,answer]);
+  await c.query('COMMIT');return true;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function publishStage(guild,n,force){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT * FROM dj_stages WHERE guild_id=$1 AND stage_no=$2 FOR UPDATE',[guild,n])).rows[0];
+  if(!st||!['collect','published'].includes(st.state))throw Error('Cette épreuve n’est pas prête pour publication.');
+  const count=Number((await c.query('SELECT COUNT(*)::int AS count FROM dj_stage_answers WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows[0].count);
+  if(count===0)throw Error('Aucune réponse reçue.');
+  if(st.state==='collect'&&count<st.active_count&&!force)throw Error(`Seulement ${count}/${st.active_count} réponses. Pour publier malgré les absents, utilise forcer:true (leurs notes seront 0).`);
+  if(st.state==='collect')await c.query("UPDATE dj_stages SET state='published' WHERE guild_id=$1 AND stage_no=$2",[guild,n]);
+  await c.query('COMMIT');return {total:count,expected:st.active_count,repost:st.state==='published'};
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function stageRate(guild,n,judge,candidate,grade){
+ if(!Number.isInteger(grade)||grade<0||grade>10)throw Error('La note doit être un entier entre 0 et 10.');
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=$2 FOR UPDATE',[guild,n])).rows[0];
+  if(st?.state!=='published')throw Error('Le jury ne peut plus noter cette épreuve.');
+  const judgeOk=(await c.query("SELECT 1 FROM dj_users WHERE guild_id=$1 AND user_id=$2 AND kind='judge'",[guild,judge])).rowCount>0;
+  const candOk=(await c.query("SELECT 1 FROM dj_users u JOIN dj_stage_answers a ON a.guild_id=u.guild_id AND a.candidate_id=u.user_id AND a.stage_no=$3 WHERE u.guild_id=$1 AND u.user_id=$2 AND u.kind='candidate' AND u.active=TRUE",[guild,candidate,n])).rowCount>0;
+  if(!judgeOk||!candOk)throw Error('Juge non inscrite ou candidat sans réponse publiée.');
+  await c.query(`INSERT INTO dj_stage_ratings(guild_id,stage_no,judge_id,candidate_id,grade) VALUES($1,$2,$3,$4,$5)
+   ON CONFLICT(guild_id,stage_no,judge_id,candidate_id) DO UPDATE SET grade=$5,updated_at=NOW()`,[guild,n,judge,candidate,grade]);
+  await c.query('COMMIT');return true;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+function calculateStageScores(candidates,answers,ratings,judges){
+ const submitted=new Set(answers.map(x=>x.candidate_id));
+ const candidateIds=new Set(candidates.map(x=>x.user_id));
+ const judgeIds=new Set(judges.map(x=>x.user_id));
+ const graded=new Map();
+ for(const r of ratings){
+  if(!judgeIds.has(r.judge_id)||!submitted.has(r.candidate_id)||!candidateIds.has(r.candidate_id))continue;
+  if(!graded.has(r.judge_id))graded.set(r.judge_id,new Map());
+  graded.get(r.judge_id).set(r.candidate_id,Number(r.grade));
+ }
+ const validJudges=[...graded].filter(([id,m])=>m.size===submitted.size).map(([id])=>id);
+ const scores=candidates.map(p=>{
+  const points=submitted.has(p.user_id)?validJudges.reduce((sum,id)=>sum+graded.get(id).get(p.user_id),0):0;
+  return {...p,points,mean:validJudges.length?points/validJudges.length:0,has_answer:submitted.has(p.user_id)};
+ });
+ return {scores,validJudges,graded,submitted};
+}
+async function stageCandidates(guild,n){return (await q("SELECT u.* FROM dj_users u JOIN dj_stage_participants p ON p.guild_id=u.guild_id AND p.candidate_id=u.user_id AND p.stage_no=$2 WHERE u.guild_id=$1 ORDER BY u.number",[guild,n])).rows;}
+async function stageStats(guild,n){
+ const [candidates,judges,answers,ratings]=await Promise.all([
+  stageCandidates(guild,n),entries(guild,'judge'),stageAnswers(guild,n),stageRatings(guild,n)]);
+ return {...calculateStageScores(candidates,answers,ratings,judges),candidates,judges,answers,ratings};
+}
+async function closeStage(guild,n){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=$2 FOR UPDATE',[guild,n])).rows[0];
+  if(st?.state!=='published')throw Error('Il faut d’abord publier les réponses et ouvrir la notation.');
+  const candidates=(await c.query("SELECT * FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE ORDER BY number",[guild])).rows;
+  const judges=(await c.query("SELECT * FROM dj_users WHERE guild_id=$1 AND kind='judge'",[guild])).rows;
+  const answers=(await c.query('SELECT * FROM dj_stage_answers WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows;
+  const ratings=(await c.query('SELECT * FROM dj_stage_ratings WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows;
+  const result=calculateStageScores(candidates,answers,ratings,judges);
+  if(!result.validJudges.length)throw Error('Aucune juge n’a noté TOUS les candidats ayant répondu. Il faut au moins un bulletin complet pour clôturer.');
+  await c.query("UPDATE dj_stages SET state='closed' WHERE guild_id=$1 AND stage_no=$2",[guild,n]);
+  await c.query('COMMIT');return result;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function finishStage(guild,n,toEliminate,numbers){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=$2 FOR UPDATE',[guild,n])).rows[0];
+  if(st?.state!=='closed')throw Error('Il faut clôturer la notation de cette épreuve.');
+  const candidates=(await c.query("SELECT * FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE ORDER BY number FOR UPDATE",[guild])).rows;
+  const judges=(await c.query("SELECT * FROM dj_users WHERE guild_id=$1 AND kind='judge'",[guild])).rows;
+  const answers=(await c.query('SELECT * FROM dj_stage_answers WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows;
+  const ratings=(await c.query('SELECT * FROM dj_stage_ratings WHERE guild_id=$1 AND stage_no=$2',[guild,n])).rows;
+  const stats=calculateStageScores(candidates,answers,ratings,judges);
+  const chosen=bottomCut(stats.scores,toEliminate,numbers);
+  for(const p of chosen)await c.query("UPDATE dj_users SET active=FALSE WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE",[guild,p.user_id]);
+  await c.query("UPDATE dj_stages SET state='eliminated' WHERE guild_id=$1 AND stage_no=$2",[guild,n]);
+  await c.query('COMMIT');return {chosen,stats};
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
 async function reset(guild){
  const c=await pool.connect();try{await c.query('BEGIN');
- for(const t of ['dj_votes','dj_questions','dj_users'])await c.query(`DELETE FROM ${t} WHERE guild_id=$1`,[guild]);
+ for(const t of ['dj_stage_ratings','dj_stage_answers','dj_stage_participants','dj_stages','dj_votes','dj_questions','dj_users'])await c.query(`DELETE FROM ${t} WHERE guild_id=$1`,[guild]);
  await c.query("UPDATE dj_sessions SET phase='draft',announce_channel=NULL,announce_message=NULL,round_no=0,deadline=NULL,vote_message=NULL,vote_channel=NULL,vote_kind=NULL,vote_choices=NULL WHERE guild_id=$1",[guild]);
  await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
-module.exports={init,q,one,session,updateSession,phaseTransition,isAdmin,addAdmin,removeAdmin,entry,upsertEntry,removeEntry,entries,assignNumbers,savePresentation,addQuestion,question,saveAnswer,questions,vote,unvote,votes,tally,eliminate,reset};
+module.exports={init,q,one,session,updateSession,phaseTransition,isAdmin,addAdmin,removeAdmin,entry,upsertEntry,removeEntry,entries,assignNumbers,savePresentation,addQuestion,question,saveAnswer,questions,vote,unvote,votes,tally,eliminate,reset,parseNumbers,bottomCut,latestStage,stage,stageAnswers,stageRatings,stageCandidates,selection,startStage,saveStageAnswer,publishStage,stageRate,calculateStageScores,stageStats,closeStage,finishStage};
