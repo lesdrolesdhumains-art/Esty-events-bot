@@ -49,7 +49,7 @@ const command = new SlashCommandBuilder().setName('donjuan').setDescription('�
   .addSubcommand(x=>x.setName('suivi').setDescription('Réponses et notes reçues (privé)'))
   .addSubcommand(x=>x.setName('rappels').setDescription('Relancer les candidats sans texte, ou rappeler les juges'))
   .addSubcommand(x=>x.setName('publier').setDescription('Publier les textes et ouvrir les notes /10').addBooleanOption(o=>o.setName('forcer').setDescription('Autoriser la publication avec des réponses manquantes')))
-  .addSubcommand(x=>x.setName('fermer').setDescription('Clôturer les notes et calculer le classement de CE défi'))
+  .addSubcommand(x=>x.setName('fermer').setDescription('Clôturer les notes et calculer le classement de CE défi').addBooleanOption(o=>o.setName('forcer').setDescription('Finale uniquement : accepter les bulletins complets si certaines juges manquent')))
   .addSubcommand(x=>x.setName('classement').setDescription('Classement indépendant de cette épreuve (privé)'))
   .addSubcommand(x=>x.setName('eliminer').setDescription('Éliminer selon ce défi (7→4, 4→2, 2→1)').addStringOption(o=>o.setName('numeros').setDescription('En cas d’égalité : 2,5,8')).addStringOption(o=>o.setName('confirmation').setDescription('Écrire ELIMINER pour confirmer'))));
 function rowButton(id,label){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(ButtonStyle.Primary));}
@@ -283,7 +283,7 @@ async function showProgress(i,s){
  sections.push(`🏆 **${s.phase==='challenges'?'ANCIENS SCORES (ARCHIVES, NON UTILISÉS POUR LES DÉFIS)':'SCORES ACTUELS'}**\n${anonScores(candidates)||'_Pas de scores_'}\n\n💡 Identités derrière les numéros : /donjuan identites.`);
  if(s.phase==='challenges'){
   const last=await store.latestStage(guild);
-  if(last?.stage_no>=1){const stats=await store.stageStats(guild,last.stage_no);
+  if(last?.stage_no>=1){const stats=last.stage_no===3?await store.finaleStats(guild):await store.stageStats(guild,last.stage_no);
    sections.push(stageReportText(last.stage_no,stats));
    if(['closed','eliminated'].includes(last.state))sections.push(stageRanking(last.stage_no,stats));
   }
@@ -297,12 +297,60 @@ const STAGES={
    prompt:'🌹 LE DÉFI DU POÈTE — « Elle, ma reine »\nImagine une femme que tu désires profondément, qui te fascine et te trouble. Écris un poème original pour la placer sur un piédestal : fais d’elle ta muse, ta reine. Célèbre sa beauté, mais aussi son esprit, sa force et sa liberté, sans la réduire à son physique.\n\nRÈGLES : un titre obligatoire ; entre 10 et 25 vers (un vers = une ligne de texte non vide) ; style sensuel, élégant et romantique, sans vulgarité ni description sexuelle explicite. Ne révèle pas son identité.\n\nOBJECTIF : qu’en lisant ton poème, chaque juge rêve d’être cette femme. Fais-nous ressentir pourquoi elle est exceptionnelle à tes yeux.'},
  2:{name:'🌹 Le rendez-vous à 30 €',start:4,out:2,max:1200,
    prompt:'Imagine un rendez-vous romantique mémorable pour deux personnes, avec un budget TOTAL de 30 € maximum. Précise le lieu, le déroulement, les petites attentions et le prix de chaque dépense. Une proposition qui dépasse 30 € sera moins bien notée.'},
- 3:{name:'⚔️ Le grand duel final',start:2,out:1,max:1200,
-   prompt:'Trois mini-défis identiques pour les deux finalistes. Réponds aux TROIS dans un seul texte (1 200 caractères max) en les numérotant :\n1. ROMANTIQUE — Comment redonnerais-tu confiance à une femme après une déception ?\n2. PSYCHOLOGIQUE — Une femme n’a pas besoin d’un homme pour être heureuse : qu’apporterais-tu à sa vie sans limiter sa liberté ?\n3. PLAIDOIRIE — Pourquoi mérites-tu le titre Don Juan, sans parler de ton physique, de ton argent ni dénigrer l’autre finaliste ?'}
+ 3:{name:'👑 Finale — Les trois épreuves du Don Juan',start:2,out:1,max:1800,
+   prompt:'GRANDE FINALE : 1. L’art du premier pas (aborder une lectrice dans un parc) ; 2. Entre amour et fierté (gérer un désaccord dans son couple) ; 3. Pourquoi moi, et pas lui ? (convaincre le jury de voter pour soi). Chaque acte possède son formulaire distinct (1 800 caractères maximum), et les juges donnent une note sur 10 par finaliste et par acte.'}
 };
 const stageLabel=n=>STAGES[n]?.name||'Sélection historique';
 const stageButton=n=>rowButton(`dj:stage:write:${n}`,'Répondre à cette épreuve');
 const ratingButton=n=>rowButton(`dj:stage:rate:${n}`,'Noter un candidat /10');
+const FINALE_ACTS=[
+ {name:'🌹 ACTE 1 — L’ART DU PREMIER PAS',short:'Premier pas',prompt:`Tu te promènes tranquillement dans un parc lorsqu’une jeune femme attire ton regard. Elle est assise seule sur un banc, plongée dans la lecture d’un livre. Tu la trouves charmante et tu aimerais faire sa connaissance. Mais elle ne t’a pas remarqué : tu ignores son prénom, si elle est célibataire, et surtout si elle souhaite être dérangée.
+
+TA MISSION : raconte comment tu l’aborderais pour la toute première fois. Quels seraient tes premiers mots ? Comment engagerais-tu une conversation naturelle, avec humour ou originalité, et lui donnerais-tu envie de te revoir ? Fais vivre une scène crédible, avec quelques répliques et ses réactions possibles.
+
+RÈGLES : pas de phrase de drague toute faite, pas de compliment lourd ni d’insistance. Si elle ne souhaite pas discuter, tu respectes son choix. Les juges évalueront le naturel, le charme, le respect, l’humour et l’originalité.`},
+ {name:'💔 ACTE 2 — ENTRE AMOUR ET FIERTÉ',short:'Amour et fierté',prompt:`Une dispute importante éclate avec ta compagne. Vous êtes tous les deux persuadés d’avoir raison sur un sujet qui compte pour vous et aucun ne veut céder. Le désaccord est profond, la tension monte, mais vous tenez à votre couple.
+
+TA MISSION : imagine l’objet de ce désaccord et raconte concrètement comment tu gères la situation. Comment désamorces-tu l’embrouille ? Comment écoutes-tu et comprends-tu la position de ta femme, même si tu ne la partages pas ? Comment lui fais-tu entendre la tienne ? Quelle solution proposes-tu pour avancer ensemble sans renier tes convictions ni lui imposer les tiennes ?
+
+RÈGLES : pas de réconciliation magique, ni de simples « je t’aime » pour éviter le problème. Montre des paroles, des actes et un compromis crédibles. Les juges évalueront la maturité, l’écoute, la communication, le respect et la capacité à protéger le couple.`},
+ {name:'👑 ACTE 3 — POURQUOI MOI, ET PAS LUI ?',short:'Discours final',prompt:`Tu es arrivé jusqu’à la grande finale du Don Juan des Drôles d’Humains. Face à toi, un autre prétendant au titre. Les juges ont vu tes prestations, mais il reste une dernière occasion de faire pencher leurs votes : ton discours de campagne !
+
+TA MISSION : écris un texte pour convaincre les juges que TU mérites le titre de meilleur Don Juan du serveur. Pourquoi toi plutôt que ton adversaire ? Quelles sont tes qualités de séducteur, ton charme, tes atouts secrets ? Fais preuve de culot, de créativité et d’une bonne dose de second degré pour leur donner envie de voter pour toi.
+
+RÈGLES : humour, arrogance pour rire, charme, provocations gentilles et mauvaise foi assumée autorisés ! Pas d’attaque personnelle contre l’autre finaliste. Termine par une phrase ou un slogan mémorable. Les juges évalueront le charisme, l’humour, l’originalité et le pouvoir de persuasion.`}
+];
+const finaleWriteButton=act=>rowButton(`dj:finale:write:${act}`,'Répondre à l’acte '+act);
+const finaleRateButton=act=>rowButton(`dj:finale:rate:${act}`,'Noter l’acte '+act+' /10');
+function finaleReportText(stats){
+ const answerSet=new Set(stats.answers.map(a=>`${a.candidate_id}:${a.act_no}`));
+ return [
+ '👑 **GRANDE FINALE — CONFIDENTIEL ESTY**',
+ `💌 Réponses : ${stats.answers.length}/6`,
+ ...stats.candidates.map(p=>`Finaliste ${p.finale_number} : <@${p.user_id}> (ancien numéro #${p.number}) — ${[1,2,3].map(act=>answerSet.has(`${p.user_id}:${act}`)?'✅':'⏳').join(' ')}`),
+ `🗳️ Notations (total requis : ${stats.required.size} par juge) :`,
+ ...stats.judges.map(j=>`${stats.graded.get(j.user_id)?.size===stats.required.size&&stats.required.size?'✅':'⏳'} <@${j.user_id}> : ${stats.graded.get(j.user_id)?.size||0}/${stats.required.size}`),
+ `✅ Bulletins complets : ${stats.validJudges.length}/${stats.judges.length}`
+ ].join('\n');
+}
+function finaleRanking(stats){
+ return ['👑 **VERDICT PRIVÉ DE LA FINALE — NE PAS PUBLIER AVANT LE COURONNEMENT**',
+ `✅ Bulletins complets : ${stats.validJudges.length}/${stats.judges.length}`,
+ ...stats.scores.slice().sort((a,b)=>b.points-a.points||a.finale_number-b.finale_number).map(p=>`Finaliste ${p.finale_number} : **${p.mean.toFixed(2)}/30** — premier pas ${p.perAct[0].toFixed(2)}/10, amour et fierté ${p.perAct[1].toFixed(2)}/10, discours final ${p.perAct[2].toFixed(2)}/10`)].join('\n');
+}
+async function sendFinaleForms(){
+ const st=await store.stage(guild,3);if(st?.state!=='collect')return 0;
+ const [players,answers]=await Promise.all([store.finaleCandidates(guild),store.finaleAnswers(guild)]);
+ const complete=new Set(answers.map(x=>`${x.candidate_id}:${x.act_no}`));let sent=0;
+ for(const p of players)for(let act=1;act<=3;act++){
+  if(complete.has(`${p.user_id}:${act}`))continue;
+  const a=FINALE_ACTS[act-1];
+  const msg=`👑 **DON JUAN — FINALE : Finaliste ${p.finale_number}**\n**${a.name}**\n\n${a.prompt}\n\n💌 Réponds avec le bouton ci-dessous (1 800 caractères maximum). Tes 3 réponses sont indépendantes, modifiables avant publication. Aucun ancien numéro ne sera montré aux juges.`;
+  if(await dmUser(p.user_id,msg,[finaleWriteButton(act)]))sent++;
+ }
+ return sent;
+}
+
 // Chaque ligne non vide est un vers. Les retours à la ligne vides séparent des strophes.
 function countPoemVerses(poem){return poem.split(/\r?\n/).filter(line=>line.trim().length>0).length;}
 function splitDiscordText(text,max=1750){
@@ -321,6 +369,7 @@ function splitDiscordText(text,max=1750){
  return parts.length?parts:[''];
 }
 function stageReportText(n,stats){
+ if(n===3)return finaleReportText(stats);
  const counts=new Map();for(const r of stats.ratings){if(!counts.has(r.judge_id))counts.set(r.judge_id,new Set());counts.get(r.judge_id).add(r.candidate_id);}
  const ans=stats.answers.length;
  return [`👑 **ÉPREUVE ${n} — ${stageLabel(n)}**`,
@@ -331,12 +380,14 @@ function stageReportText(n,stats){
    '',`✅ Bulletins entièrement remplis : ${stats.validJudges.length}/${stats.judges.length}`].join('\n');
 }
 function stageRanking(n,stats){
+ if(n===3)return finaleRanking(stats);
  return [`🏆 **CLASSEMENT ÉPREUVE ${n} — ${stageLabel(n)}**`,
   'Ce classement utilise **uniquement** les notes de cette épreuve ; les anciens points ne comptent pas.',
   `✅ ${stats.validJudges.length} juge(s) avec un bulletin complet (bulletins incomplets non comptés)`,
   ...stats.scores.slice().sort((a,b)=>b.points-a.points||a.number-b.number).map(p=>`Candidat #${p.number} — **${p.mean.toFixed(2)}/10** ${p.has_answer?'':'(aucune réponse : 0)'}`)].join('\n');
 }
 async function sendStageForms(n){
+ if(n===3)return sendFinaleForms();
  const stage=await store.stage(guild,n);if(!stage||stage.state!=='collect')return 0;
  const participants=await store.stageCandidates(guild,n),answers=await store.stageAnswers(guild,n);
  const replied=new Set(answers.map(a=>a.candidate_id));let count=0;
@@ -379,17 +430,32 @@ async function handleStageCommand(i){
   if(n>3)return privateReply(i,'Les trois nouvelles épreuves sont terminées. Il est temps de couronner le gagnant !');
   if(latest?.state!=='eliminated')return privateReply(i,'Termine la dernière épreuve et ses éliminations avant de lancer la suivante.');
   const setting=STAGES[n];
+  // La connexion Neon peut être lente : acquitter la commande avant la transaction.
+  await i.deferReply({flags:FLAG});
   await store.startStage(guild,n,setting.prompt,setting.start);
-  await i.deferReply({flags:FLAG});const sent=await sendStageForms(n);
+  const sent=await sendStageForms(n);
   return privateReply(i,`✅ **${stageLabel(n)}** ouverte avec ${setting.start} candidats. ${sent} MP envoyés.\nConsigne identique à tous :\n${setting.prompt}\n\nConsulte /donjuan epreuves suivi pour voir les retardataires.`);
  }
  if(!latest||latest.stage_no<1)return privateReply(i,'Commence par la sélection 10 → 7 avec `/donjuan epreuves selection`.');
  const n=latest.stage_no;
  if(sub==='suivi'){
-  const st=await store.stageStats(guild,n);
+  const st=n===3?await store.finaleStats(guild):await store.stageStats(guild,n);
   return privateSections(i,[`🔐 État de l’épreuve : **${latest.state}**`,stageReportText(n,st)]);
  }
  if(sub==='rappels'){
+  if(n===3){
+   if(latest.state==='collect'){
+    await i.deferReply({flags:FLAG});const sent=await sendFinaleForms();
+    return privateReply(i,`💌 ${sent} message(s) envoyés pour les actes encore sans réponse. Les réponses existantes sont conservées.`);
+   }
+   if(latest.state==='published'){
+    const stats=await store.finaleStats(guild),unfinished=stats.judges.filter(j=>(stats.graded.get(j.user_id)?.size||0)<stats.required.size);
+    await i.deferReply({flags:FLAG});let sent=0;
+    for(const j of unfinished)if(await dmUser(j.user_id,`👑 **Finale Don Juan — notes manquantes**\nTu as rempli ${stats.graded.get(j.user_id)?.size||0}/${stats.required.size} notes. Chaque acte de chaque finaliste doit être noté.`,FINALE_ACTS.map((_,ix)=>finaleRateButton(ix+1))))sent++;
+    return privateReply(i,`✅ ${sent} MP envoyés à ${unfinished.length} juge(s) ayant des notes manquantes.`);
+   }
+   return privateReply(i,'La finale est déjà clôturée.');
+  }
   if(latest.state==='collect'){
    await i.deferReply({flags:FLAG});const sent=await sendStageForms(n);
    return privateReply(i,`💌 ${sent} MP de rappel envoyés aux candidats sans réponse. Aucun texte existant modifié.`);
@@ -404,6 +470,27 @@ async function handleStageCommand(i){
   return privateReply(i,'Aucun rappel possible : l’épreuve est clôturée.');
  }
  if(sub==='publier'){
+  if(n===3){
+   if(!['collect','published'].includes(latest.state))return privateReply(i,'La finale est déjà clôturée.');
+   const answers=await store.finaleAnswers(guild),players=await store.finaleCandidates(guild);
+   if(answers.length<6&&!i.options.getBoolean('forcer')&&latest.state==='collect')return privateReply(i,`⏳ ${answers.length}/6 réponses. Attends les autres ou utilise forcer:true (réponses manquantes = 0).`);
+   if(!answers.length)return privateReply(i,'Aucune réponse reçue.');
+   await i.deferReply({flags:FLAG});const published=await store.publishFinale(guild,Boolean(i.options.getBoolean('forcer')));
+   await judgePost(sess,'# 👑 DON JUAN — GRANDE FINALE : LES TROIS ÉPREUVES DU DON JUAN\n**2 finalistes. 3 actes.** Les numéros 1 et 2 sont nouveaux, tirés au sort et sans lien avec les anciennes épreuves.\nChaque juge doit noter **les deux finalistes sur /10 pour chacun des trois actes**. Soit **6 notes**, avant de pouvoir clôturer. Les anciens scores sont exclus.');
+   const answersMap=new Map(answers.map(a=>[`${a.candidate_id}:${a.act_no}`,a.answer]));
+   for(let act=1;act<=3;act++){
+    const a=FINALE_ACTS[act-1];
+    await judgePost(sess,`## ${a.name}\n${a.prompt}`);
+    for(const p of players){
+     const answer=answersMap.get(`${p.user_id}:${act}`);
+     if(answer){
+      for(const [idx,part] of splitDiscordText(answer,1650).entries())await judgePost(sess,`**Finaliste ${p.finale_number} — ${a.short}**${answer.length>1650?` (partie ${idx+1})`:''}\n${part}`);
+     }else await judgePost(sess,`**Finaliste ${p.finale_number} — ${a.short}**\n_Aucune réponse reçue : 0 automatique pour cet acte._`);
+    }
+    await judgePost(sess,`🗳️ **NOTATION ${a.short.toUpperCase()}** : clique ci-dessous, saisis « 1 » ou « 2 », puis une note entière de 0 à 10. Note les deux finalistes.`,[finaleRateButton(act)]);
+   }
+   return privateReply(i,`✅ ${published.total}/6 réponses publiées. Les juges peuvent désormais attribuer leurs notes séparées. Suivi : /donjuan epreuves suivi.`);
+  }
   if(!['collect','published'].includes(latest.state))return privateReply(i,'La publication de cette épreuve est déjà terminée.');
   const candidates=await store.stageCandidates(guild,n),responses=await store.stageAnswers(guild,n);
   if(responses.length<candidates.length&&!i.options.getBoolean('forcer')&&latest.state==='collect')
@@ -428,6 +515,13 @@ async function handleStageCommand(i){
   return privateReply(i,`✅ ${r.total}/${r.expected} textes publiés ; notation ouverte. ${r.repost?'⚠️ Publication rejouée : il peut y avoir des messages en double.':''} /donjuan epreuves suivi te montre la progression des juges.`);
  }
  if(sub==='fermer'){
+  if(n===3){
+   if(latest.state!=='published')return privateReply(i,'La notation de la finale doit être ouverte pour la fermer.');
+   await i.deferReply({flags:FLAG});
+   const result=await store.closeFinale(guild,Boolean(i.options.getBoolean('forcer')));
+   await judgePost(sess,'🔒 **FINALE — NOTES CLÔTURÉES**\nMerci aux juges ! Les résultats restent secrets jusqu’au couronnement 👑');
+   return privateReply(i,`✅ Finale clôturée : ${result.validJudges.length}/${result.judges.length} bulletins complets. Consulte /donjuan epreuves classement EN PRIVÉ, puis /donjuan epreuves eliminer.`);
+  }
   if(latest.state!=='published')return privateReply(i,'La notation doit être ouverte pour être clôturée.');
   await i.deferReply({flags:FLAG});
   const st=await store.closeStage(guild,n);
@@ -436,9 +530,20 @@ async function handleStageCommand(i){
  }
  if(sub==='classement'){
   if(!['closed','eliminated'].includes(latest.state))return privateReply(i,'Les notes doivent être closes avant de montrer le classement final.');
-  return privateSections(i,[stageRanking(n,await store.stageStats(guild,n))]);
+  return privateSections(i,[stageRanking(n,n===3?await store.finaleStats(guild):await store.stageStats(guild,n))]);
  }
  if(sub==='eliminer'){
+  if(n===3){
+   if(latest.state!=='closed')return privateReply(i,'Clôture les notes de la finale avant les éliminations.');
+   const numbers=store.parseNumbers(i.options.getString('numeros')),stats=await store.finaleStats(guild);
+   let candidates;
+   try{candidates=store.bottomCut(stats.scores,1,numbers);}
+   catch(e){if(e.code==='DJ_CUTOFF_TIE')return privateReply(i,'⚖️ Les finalistes sont à égalité. Choisis une méthode de départage, puis indique avec « numeros » le NOUVEAU numéro du finaliste à éliminer. Aucun changement effectué.');throw e;}
+   const loser=candidates[0];
+   if(i.options.getString('confirmation')!=='ELIMINER')return privateReply(i,`🔒 **PRÉVISUALISATION PRIVÉE**\nFinaliste ${loser.finale_number} (${loser.mean.toFixed(2)}/30) serait éliminé. Aucun changement. Pour confirmer : /donjuan epreuves eliminer confirmation:ELIMINER.`);
+   await store.finishFinale(guild,numbers);
+   return privateReply(i,'✅ Verdict enregistré dans Neon. Aucune identité ni résultat n’a été révélé dans les salons. Lance /donjuan finale pour couronner le gagnant 👑');
+  }
   if(latest.state!=='closed')return privateReply(i,'Il faut fermer la notation avant les éliminations.');
   const cfg=STAGES[n],numbers=store.parseNumbers(i.options.getString('numeros'));
   const stats=await store.stageStats(guild,n);
@@ -455,9 +560,43 @@ async function handleStageCommand(i){
  }
  return privateReply(i,'Sous-commande épreuve inconnue.');
 }
+async function handleFinaleComponent(i){
+ const parts=i.customId.split(':'),actName=parts[2],act=Number(parts[3]);
+ if(!Number.isInteger(act)||act<1||act>3)return privateReply(i,'Acte inconnu.');
+ const stage=await store.stage(guild,3),user=await store.entry(guild,i.user.id);
+ if(actName==='write'&&i.isButton()){
+  const candidates=await store.finaleCandidates(guild);
+  if(stage?.state!=='collect'||!candidates.some(p=>p.user_id===i.user.id))return privateReply(i,'La collecte est fermée ou tu ne participes pas à la finale.');
+  return i.showModal(modal(`dj:finale:submit:${act}`,`Finale — ${FINALE_ACTS[act-1].short}`,[{id:'answer',label:'Ton texte (max 1800 caractères)',max:1800,long:true}]));
+ }
+ if(actName==='submit'&&i.isModalSubmit()){
+  const answer=i.fields.getTextInputValue('answer').trim();
+  if(!answer)return dmReply(i,'Ta réponse est vide.');
+  await store.saveFinaleAnswer(guild,i.user.id,act,answer);
+  const answers=await store.finaleAnswers(guild),count=answers.filter(a=>a.candidate_id===i.user.id).length;
+  return dmReply(i,`✅ Réponse pour **${FINALE_ACTS[act-1].short}** enregistrée (${count}/3 actes complétés). Modifiable jusqu’à la publication.`);
+ }
+ if(actName==='rate'&&i.isButton()){
+  if(stage?.state!=='published'||user?.kind!=='judge')return privateReply(i,'Notes fermées ou réservées aux juges inscrites.');
+  return i.showModal(modal(`dj:finale:grade:${act}`,`Noter ${FINALE_ACTS[act-1].short}`,[
+   {id:'number',label:'Numéro du finaliste : 1 ou 2',max:1},
+   {id:'grade',label:'Note entière de 0 à 10',max:2}
+  ]));
+ }
+ if(actName==='grade'&&i.isModalSubmit()){
+  const raw=i.fields.getTextInputValue('number').trim(),rawGrade=i.fields.getTextInputValue('grade').trim();
+  if(!/^[12]$/.test(raw)||!/^(10|[0-9])$/.test(rawGrade))return privateReply(i,'Saisis 1 ou 2 et une note entière de 0 à 10.');
+  const candidates=await store.finaleCandidates(guild),candidate=candidates.find(p=>p.finale_number===Number(raw));
+  if(!candidate)return privateReply(i,'Numéro de finaliste introuvable.');
+  await store.finaleRate(guild,i.user.id,candidate.user_id,act,Number(rawGrade));
+  const stats=await store.finaleStats(guild),current=stats.graded.get(i.user.id)?.size||0;
+  return privateReply(i,`✅ ${FINALE_ACTS[act-1].short} : Finaliste ${raw} noté **${rawGrade}/10**. Ton bulletin : **${current}/${stats.required.size} notes** complétées. Tu peux modifier tes notes jusqu’à la clôture.`);
+ }
+ return privateReply(i,'Action inconnue pour la finale.');
+}
 async function handleStageComponent(i){
  const parts=i.customId.split(':'),act=parts[2],n=Number(parts[3]);
- if(!STAGES[n])return privateReply(i,'Épreuve inconnue.');
+ if(!STAGES[n]||n===3)return privateReply(i,'Utilise les nouveaux boutons individuels de la finale.');
  if(act==='write'&&i.isButton()){
   const st=await store.stage(guild,n),p=await store.entry(guild,i.user.id);
   if(st?.state!=='collect'||p?.kind!=='candidate'||!p.active)return privateReply(i,'Épreuve fermée ou tu ne participes pas.');
@@ -719,7 +858,10 @@ ${anonScores(c)||'En attente'}${last?'\n\nClassement du nouveau défi : `/donjua
   if(s.phase==='challenges' && !(await store.stage(guild,3) && (await store.stage(guild,3)).state==='eliminated'))return privateReply(i,'Termine le duel et son élimination avant le couronnement.');
   const c=await store.entries(guild,'candidate',true);
   if(c.length!==1)return privateReply(i,`Il reste ${c.length} prétendants. Élimine les candidats d’abord.`);
-  const winner=c[0];const last=s.phase==='challenges'?await store.stageStats(guild,3):null;const resultText=last?`Note finale : **${last.scores.find(x=>x.user_id===winner.user_id)?.mean.toFixed(2)}/10** (épreuve uniquement)`:`**${winner.score} points**`;await publicPost(`# 👑 LE DON JUAN DU SERVEUR EST…\n🥁🥁🥁\n**<@${winner.user_id}>** !\nCandidat #${winner.number} · ${resultText} ! 🏆\nFélicitations et merci aux juges !`);
+  const winner=c[0],last=s.phase==='challenges'?await store.finaleStats(guild):null;
+  const resultText=last?`**${last.scores.find(x=>x.user_id===winner.user_id)?.mean.toFixed(2)}/30** à la finale (3 actes)`:`**${winner.score} points**`;
+  const label=last?`Finaliste ${last.scores.find(x=>x.user_id===winner.user_id)?.finale_number}`:`Candidat #${winner.number}`;
+  await publicPost(`# 👑 LE DON JUAN DU SERVEUR EST…\n🥁🥁🥁\n**<@${winner.user_id}>** !\n${label} · ${resultText} ! 🏆\nFélicitations à nos deux finalistes et aux juges !`);
   let roleStatus='Rôle non configuré.';
   if(s.winner_role){try{const g=await bot.guilds.fetch(guild),member=await g.members.fetch(winner.user_id);await member.roles.add(s.winner_role);roleStatus='Rôle Don Juan attribué.';}catch(e){roleStatus=`Rôle non attribué : ${e.message}`;}}
   await store.updateSession(guild,{phase:'ended'});
@@ -734,6 +876,7 @@ ${anonScores(c)||'En attente'}${last?'\n\nClassement du nouveau défi : `/donjua
 }
 async function handleComponent(i){
  const cid=i.customId;
+ if(cid.startsWith('dj:finale:'))return handleFinaleComponent(i);
  if(cid.startsWith('dj:stage:'))return handleStageComponent(i);
 
  if(cid==='dj:present'&&i.isButton()){

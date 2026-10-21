@@ -69,6 +69,25 @@ async function init() {
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY(guild_id,stage_no,judge_id,candidate_id)
  );
+ -- Finale V2 : les numéros historiques ne changent jamais. Nouveaux alias 1/2 séparés.
+ CREATE TABLE IF NOT EXISTS dj_finale_aliases (
+  guild_id TEXT NOT NULL, candidate_id TEXT NOT NULL,
+  alias INT NOT NULL CHECK(alias IN (1,2)),
+  PRIMARY KEY(guild_id,candidate_id), UNIQUE(guild_id,alias)
+ );
+ CREATE TABLE IF NOT EXISTS dj_finale_answers (
+  guild_id TEXT NOT NULL, candidate_id TEXT NOT NULL,
+  act_no INT NOT NULL CHECK(act_no BETWEEN 1 AND 3), answer TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(guild_id,candidate_id,act_no)
+ );
+ CREATE TABLE IF NOT EXISTS dj_finale_ratings (
+  guild_id TEXT NOT NULL, judge_id TEXT NOT NULL, candidate_id TEXT NOT NULL,
+  act_no INT NOT NULL CHECK(act_no BETWEEN 1 AND 3),
+  grade INT NOT NULL CHECK(grade BETWEEN 0 AND 10),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(guild_id,judge_id,candidate_id,act_no)
+ );
  `);
 }
 async function q(sql,params=[]) {return pool.query(sql,params);}
@@ -234,6 +253,12 @@ async function startStage(guild,n,prompt,expected){
   if(active!==expected)throw Error(`Cette épreuve doit commencer avec ${expected} candidats actifs, et non ${active}.`);
   const added=(await c.query("INSERT INTO dj_stages(guild_id,stage_no,state,prompt,active_count) VALUES($1,$2,'collect',$3,$4) RETURNING *",[guild,n,prompt,expected])).rows[0];
   await c.query("INSERT INTO dj_stage_participants(guild_id,stage_no,candidate_id) SELECT guild_id,$2,user_id FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE",[guild,n]);
+  if(n===3){
+   // Le tirage au sort se fait une fois, au sein de la transaction de démarrage.
+   const finalists=(await c.query("SELECT user_id FROM dj_users WHERE guild_id=$1 AND kind='candidate' AND active=TRUE ORDER BY RANDOM()",[guild])).rows;
+   if(finalists.length!==2)throw Error('La finale exige exactement deux candidats.');
+   for(let z=0;z<2;z++)await c.query('INSERT INTO dj_finale_aliases(guild_id,candidate_id,alias) VALUES($1,$2,$3)',[guild,finalists[z].user_id,z+1]);
+  }
   await c.query('COMMIT');return added;
  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }
@@ -329,10 +354,115 @@ async function finishStage(guild,n,toEliminate,numbers){
   await c.query('COMMIT');return {chosen,stats};
  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }
+// ================= FINALE V2 — 3 actes, 2 alias anonymes =================
+async function finaleCandidates(guild){
+ return (await q(`SELECT u.*,a.alias AS finale_number FROM dj_users u
+ JOIN dj_finale_aliases a ON a.guild_id=u.guild_id AND a.candidate_id=u.user_id
+ WHERE u.guild_id=$1 ORDER BY a.alias`,[guild])).rows;
+}
+async function finaleAnswers(guild){return (await q('SELECT * FROM dj_finale_answers WHERE guild_id=$1 ORDER BY act_no,candidate_id',[guild])).rows;}
+async function finaleRatings(guild){return (await q('SELECT * FROM dj_finale_ratings WHERE guild_id=$1',[guild])).rows;}
+async function saveFinaleAnswer(guild,user,act,answer){
+ if(!Number.isInteger(act)||act<1||act>3||!answer.trim()||answer.length>1800)throw Error('Réponse invalide (maximum 1 800 caractères).');
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=3 FOR UPDATE',[guild])).rows[0];
+  if(st?.state!=='collect')throw Error('La réception des réponses est fermée.');
+  const valid=(await c.query('SELECT 1 FROM dj_finale_aliases WHERE guild_id=$1 AND candidate_id=$2',[guild,user])).rowCount===1;
+  if(!valid)throw Error('Tu ne participes pas à la finale.');
+  await c.query(`INSERT INTO dj_finale_answers(guild_id,candidate_id,act_no,answer) VALUES($1,$2,$3,$4)
+   ON CONFLICT(guild_id,candidate_id,act_no) DO UPDATE SET answer=$4,updated_at=NOW()`,[guild,user,act,answer]);
+  await c.query('COMMIT');return true;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function publishFinale(guild,force=false){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT * FROM dj_stages WHERE guild_id=$1 AND stage_no=3 FOR UPDATE',[guild])).rows[0];
+  if(!st||!['collect','published'].includes(st.state))throw Error('Finale non publiable.');
+  const count=Number((await c.query('SELECT COUNT(*)::int AS n FROM dj_finale_answers WHERE guild_id=$1',[guild])).rows[0].n);
+  if(!count)throw Error('Aucune réponse reçue.');
+  if(st.state==='collect'&&count<6&&!force)throw Error(`Il manque ${6-count} réponse(s) sur 6. Utilise forcer:true pour publier avec des réponses manquantes.`);
+  if(st.state==='collect')await c.query("UPDATE dj_stages SET state='published' WHERE guild_id=$1 AND stage_no=3",[guild]);
+  await c.query('COMMIT');return {total:count,expected:6,repost:st.state==='published'};
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function finaleRate(guild,judge,candidate,act,grade){
+ if(!Number.isInteger(act)||act<1||act>3||!Number.isInteger(grade)||grade<0||grade>10)throw Error('Acte ou note invalide.');
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=3 FOR UPDATE',[guild])).rows[0];
+  if(st?.state!=='published')throw Error('Les notes de la finale sont fermées.');
+  const judgeOk=(await c.query("SELECT 1 FROM dj_users WHERE guild_id=$1 AND user_id=$2 AND kind='judge'",[guild,judge])).rowCount===1;
+  const answerOk=(await c.query('SELECT 1 FROM dj_finale_answers WHERE guild_id=$1 AND candidate_id=$2 AND act_no=$3',[guild,candidate,act])).rowCount===1;
+  if(!judgeOk||!answerOk)throw Error('Juge non inscrite ou réponse absente.');
+  await c.query(`INSERT INTO dj_finale_ratings(guild_id,judge_id,candidate_id,act_no,grade) VALUES($1,$2,$3,$4,$5)
+   ON CONFLICT(guild_id,judge_id,candidate_id,act_no) DO UPDATE SET grade=$5,updated_at=NOW()`,[guild,judge,candidate,act,grade]);
+  await c.query('COMMIT');return true;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+function calculateFinale(candidates,judges,answers,ratings){
+ const required=new Set(answers.map(a=>`${a.candidate_id}:${a.act_no}`));
+ const judgeIds=new Set(judges.map(j=>j.user_id));const graded=new Map();
+ for(const r of ratings){const key=`${r.candidate_id}:${r.act_no}`;
+  if(!judgeIds.has(r.judge_id)||!required.has(key))continue;
+  if(!graded.has(r.judge_id))graded.set(r.judge_id,new Map());
+  graded.get(r.judge_id).set(key,Number(r.grade));
+ }
+ const validJudges=judges.filter(j=>required.size>0&&graded.get(j.user_id)?.size===required.size).map(j=>j.user_id);
+ const scores=candidates.map(p=>{
+  const perAct=[1,2,3].map(act=>{
+   const key=`${p.user_id}:${act}`;
+   return validJudges.reduce((sum,id)=>sum+(graded.get(id).get(key)||0),0);
+  });
+  const points=perAct.reduce((a,b)=>a+b,0);
+  return {...p,number:p.finale_number,points,mean:validJudges.length?points/validJudges.length:0,
+   perAct:perAct.map(x=>validJudges.length?x/validJudges.length:0)};
+ });
+ return {scores,validJudges,graded,required,answers,ratings,candidates,judges};
+}
+async function finaleStats(guild){
+ const [candidates,judges,answers,ratings]=await Promise.all([
+  finaleCandidates(guild),entries(guild,'judge'),finaleAnswers(guild),finaleRatings(guild)]);
+ return calculateFinale(candidates,judges,answers,ratings);
+}
+async function closeFinale(guild,force=false){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=3 FOR UPDATE',[guild])).rows[0];
+  if(st?.state!=='published')throw Error('La notation de la finale doit être ouverte.');
+  const [candidates,judges,answers,ratings]=await Promise.all([
+   c.query('SELECT u.*,a.alias AS finale_number FROM dj_users u JOIN dj_finale_aliases a ON a.guild_id=u.guild_id AND a.candidate_id=u.user_id WHERE u.guild_id=$1 ORDER BY a.alias',[guild]).then(x=>x.rows),
+   c.query("SELECT * FROM dj_users WHERE guild_id=$1 AND kind='judge'",[guild]).then(x=>x.rows),
+   c.query('SELECT * FROM dj_finale_answers WHERE guild_id=$1',[guild]).then(x=>x.rows),
+   c.query('SELECT * FROM dj_finale_ratings WHERE guild_id=$1',[guild]).then(x=>x.rows)]);
+  const result=calculateFinale(candidates,judges,answers,ratings);
+  if(!result.validJudges.length)throw Error('Aucune juge n’a rempli toutes ses notes : clôture refusée.');
+  if(!force&&result.validJudges.length!==judges.length)throw Error(`Seulement ${result.validJudges.length}/${judges.length} juges ont tout noté. Relance les juges ou utilise /donjuan epreuves fermer forcer:true (les bulletins incomplets seront exclus).`);
+  await c.query("UPDATE dj_stages SET state='closed' WHERE guild_id=$1 AND stage_no=3",[guild]);
+  await c.query('COMMIT');return result;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function finishFinale(guild,numbers){
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const st=(await c.query('SELECT state FROM dj_stages WHERE guild_id=$1 AND stage_no=3 FOR UPDATE',[guild])).rows[0];
+  if(st?.state!=='closed')throw Error('Ferme les notes avant les éliminations.');
+  const candidates=(await c.query('SELECT u.*,a.alias AS finale_number FROM dj_users u JOIN dj_finale_aliases a ON a.guild_id=u.guild_id AND a.candidate_id=u.user_id WHERE u.guild_id=$1 AND u.active=TRUE ORDER BY a.alias FOR UPDATE OF u',[guild])).rows;
+  const judges=(await c.query("SELECT * FROM dj_users WHERE guild_id=$1 AND kind='judge'",[guild])).rows;
+  const answers=(await c.query('SELECT * FROM dj_finale_answers WHERE guild_id=$1',[guild])).rows;
+  const ratings=(await c.query('SELECT * FROM dj_finale_ratings WHERE guild_id=$1',[guild])).rows;
+  const stats=calculateFinale(candidates,judges,answers,ratings);
+  const chosen=bottomCut(stats.scores,1,numbers);
+  for(const p of chosen)await c.query("UPDATE dj_users SET active=FALSE WHERE guild_id=$1 AND user_id=$2 AND kind='candidate' AND active=TRUE",[guild,p.user_id]);
+  await c.query("UPDATE dj_stages SET state='eliminated' WHERE guild_id=$1 AND stage_no=3",[guild]);
+  await c.query('COMMIT');return {chosen,stats};
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
 async function reset(guild){
  const c=await pool.connect();try{await c.query('BEGIN');
- for(const t of ['dj_stage_ratings','dj_stage_answers','dj_stage_participants','dj_stages','dj_votes','dj_questions','dj_users'])await c.query(`DELETE FROM ${t} WHERE guild_id=$1`,[guild]);
+ for(const t of ['dj_finale_ratings','dj_finale_answers','dj_finale_aliases','dj_stage_ratings','dj_stage_answers','dj_stage_participants','dj_stages','dj_votes','dj_questions','dj_users'])await c.query(`DELETE FROM ${t} WHERE guild_id=$1`,[guild]);
  await c.query("UPDATE dj_sessions SET phase='draft',announce_channel=NULL,announce_message=NULL,round_no=0,deadline=NULL,vote_message=NULL,vote_channel=NULL,vote_kind=NULL,vote_choices=NULL WHERE guild_id=$1",[guild]);
  await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
 }
-module.exports={init,q,one,session,updateSession,phaseTransition,isAdmin,addAdmin,removeAdmin,entry,upsertEntry,removeEntry,entries,assignNumbers,savePresentation,addQuestion,question,saveAnswer,questions,vote,unvote,votes,tally,eliminate,reset,parseNumbers,bottomCut,latestStage,stage,stageAnswers,stageRatings,stageCandidates,selection,adoptSelection,startStage,saveStageAnswer,publishStage,stageRate,calculateStageScores,stageStats,closeStage,finishStage};
+module.exports={init,q,one,session,updateSession,phaseTransition,isAdmin,addAdmin,removeAdmin,entry,upsertEntry,removeEntry,entries,assignNumbers,savePresentation,addQuestion,question,saveAnswer,questions,vote,unvote,votes,tally,eliminate,reset,parseNumbers,bottomCut,latestStage,stage,stageAnswers,stageRatings,stageCandidates,selection,adoptSelection,startStage,saveStageAnswer,publishStage,stageRate,calculateStageScores,stageStats,closeStage,finishStage,finaleCandidates,finaleAnswers,finaleRatings,saveFinaleAnswer,publishFinale,finaleRate,finaleStats,closeFinale,finishFinale,calculateFinale};
