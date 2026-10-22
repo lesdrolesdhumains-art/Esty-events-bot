@@ -6,7 +6,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "check": "node --check bot.js && node --check db.js && node --check commands.js && node --check index.js"
+    "check": "node --check bot.js && node --check db.js && node --check commands.js && node --check index.js && node --check reine.js && node --check reine-db.js && node --check roue.js"
   },
   "engines": { "node": ">=20.11.0" },
   "dependencies": {

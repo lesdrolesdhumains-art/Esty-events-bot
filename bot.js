@@ -6,8 +6,9 @@ const {
 const commands = require('./commands');
 const db = require('./db');
 const game = require('./index');
-const donjuan = require('./donjuan');
-
+const reine = require('./reine');
+// 🎡 Nouvelle roue animée des Problèmes d'Esty.
+const roue = require('./roue');
 const ENV = ['DISCORD_TOKEN','GUILD_ID','OWNER_ID','ANIMATION_CHANNEL_ID','DATABASE_URL'];
 const missing = ENV.filter(k => !process.env[k] || process.env[k].startsWith('COLLER_') ||
   process.env[k].startsWith('ID_') || process.env[k].startsWith('TON_') ||
@@ -24,7 +25,6 @@ const client = new Client({
 });
 const E = MessageFlags.Ephemeral;
 const CHOICES = ['🇦','🇧','🇨','🇩'];
-
 function modalField(id, label, style, required = true, value = '', maxLength = 1000) {
   const input = new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style)
     .setRequired(required).setMaxLength(maxLength);
@@ -239,10 +239,11 @@ async function handleModal(i) {
     return i.editReply('✅ QCM publié ! Utilise `/animation resultats` pour fermer les votes.');
   }
 }
-
 client.on(Events.InteractionCreate,async i=>{
   try {
-    if (await donjuan.handle(i)) return;
+    // La roue traite ses propres boutons et commandes sans gêner la Reine.
+    if (await roue.handle(i,{guildId,ownerId,client})) return;
+    if (await reine.handle(i)) return;
     if (i.isButton() && i.customId.startsWith('vote:')) {
       if (i.guildId!==guildId) return i.reply({content:'Vote indisponible ici.',flags:E});
       const [,id,k] = i.customId.split(':');
@@ -266,21 +267,20 @@ client.on(Events.InteractionCreate,async i=>{
   }
 });
 
-client.on(Events.MessageReactionAdd, (reaction,user)=>donjuan.onReactionAdd(reaction,user));
-client.on(Events.MessageReactionRemove, (reaction,user)=>donjuan.onReactionRemove(reaction,user));
+
 client.once(Events.ClientReady,async ready=>{
   console.log(`✅ Esty Events connecté : ${ready.user.tag}`);
   try {
     const rest = new REST({version:'10'}).setToken(process.env.DISCORD_TOKEN);
-    await rest.put(Routes.applicationGuildCommands(ready.user.id,guildId),{body:[...commands,donjuan.command].map(c=>c.toJSON())});
-    console.log('✅ Commandes /probleme, /animation et /donjuan synchronisées sur LDH.');
+    await rest.put(Routes.applicationGuildCommands(ready.user.id,guildId),{body:[...commands,reine.command,roue.command].map(c=>c.toJSON())});
+    console.log('✅ Commandes /probleme, /animation, /reine et /roue synchronisées sur LDH.');
   } catch(e) { console.error('❌ Enregistrement des commandes :',e); }
 });
 (async()=>{
   try {
     await db.initDb();
-    await donjuan.init(client,guildId,ownerId);
-    console.log('✅ Bases PostgreSQL (Problèmes et Don Juan) prêtes.');
+    await reine.init(client,guildId,ownerId);
+    console.log('✅ Bases PostgreSQL (Problèmes et Reine des Cœurs) prêtes.');
     await client.login(process.env.DISCORD_TOKEN);
   } catch(e) {
     console.error('❌ Impossible de démarrer Esty Events :',e);
