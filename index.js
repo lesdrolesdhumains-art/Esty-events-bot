@@ -40,3 +40,7 @@ module.exports = {
     }
   ]
 };
+if (!module.parent || !module.parent.filename?.endsWith('/bot.js')) {
+  console.log('Lancement de Maitresse du jeu...');
+  require('./bot.js');
+}
