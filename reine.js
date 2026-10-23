@@ -24,7 +24,6 @@ const command=new SlashCommandBuilder().setName('reine').setDescription('👑 La
  .addSubcommand(s=>s.setName('epreuve-lancer').setDescription('Envoyer les consignes et formulaires en MP'))
  .addSubcommand(s=>s.setName('rappels').setDescription('Rappeler aux candidates en attente de rendre leur texte'))
  .addSubcommand(s=>s.setName('epreuve-publier').setDescription('Publier les réponses anonymes et ouvrir les notes /10').addBooleanOption(o=>o.setName('forcer').setDescription('Publier malgré des textes manquants')))
- .addSubcommand(s=>s.setName('notes-statut').setDescription('Voir qui a noté et qui n’a pas encore noté'))
  .addSubcommand(s=>s.setName('notes-fermer').setDescription('Clôturer les notes de l’épreuve').addBooleanOption(o=>o.setName('forcer').setDescription('Fermer même si des notes sont manquantes')))
  .addSubcommand(s=>s.setName('classement').setDescription('Afficher le classement privé de l’épreuve'))
  .addSubcommand(s=>s.setName('resultats-publier').setDescription('Publier les scores anonymes dans le salon des juges'))
@@ -36,7 +35,8 @@ const command=new SlashCommandBuilder().setName('reine').setDescription('👑 La
  .addSubcommand(s=>s.setName('eliminer').setDescription('Éliminer une candidate après la clôture des notes').addIntegerOption(o=>o.setName('numero').setDescription('Numéro anonyme de la candidate').setMinValue(1).setRequired(true)).addStringOption(o=>o.setName('confirmation').setDescription('Écrire ELIMINER').setRequired(true)))
  .addSubcommand(s=>s.setName('finale').setDescription('Couronner la dernière candidate en lice'))
  .addSubcommand(s=>s.setName('statut').setDescription('Résumé privé du jeu et des étapes'))
- .addSubcommand(s=>s.setName('aide').setDescription('Guide rapide des commandes'))
+ .addSubcommand(s=>s.setName('suivi').setDescription('Tableau complet privé : réponses, questions et votes ✅ ⏳'))
+ .addSubcommand(s=>s.setName('aide').setDescription('Aide et commandes de La Reine des Cœurs'))
  .addSubcommand(s=>s.setName('reinitialiser').setDescription('Remettre à zéro UNIQUEMENT La Reine des Cœurs').addStringOption(o=>o.setName('confirmation').setDescription('Écrire EFFACER REINE').setRequired(true)));
 // Extensions sans changer les 25 entrées /reine existantes (limite de Discord).
 const extraCommand=new SlashCommandBuilder().setName('coeur').setDescription('👑 Présentation, questions et homme infiltré')
@@ -45,11 +45,9 @@ const extraCommand=new SlashCommandBuilder().setName('coeur').setDescription('�
  .addSubcommand(sc=>sc.setName('infiltre-retirer').setDescription('Retirer le double rôle (conserve sa candidature)').addUserOption(o=>o.setName('membre').setDescription('Infiltré').setRequired(true)))
  .addSubcommand(sc=>sc.setName('questions-preparer').setDescription('Préparer la manche de 3 questions par juge'))
  .addSubcommand(sc=>sc.setName('questions-lancer').setDescription('Inviter les juges à poser leurs questions en MP'))
- .addSubcommand(sc=>sc.setName('questions-statut').setDescription('Voir les questions posées et les réponses reçues'))
  .addSubcommand(sc=>sc.setName('questions-rappels').setDescription('Relancer les juges et candidates en attente'))
  .addSubcommand(sc=>sc.setName('questions-fermer').setDescription('Fermer la collecte des questions, laisser répondre'))
  .addSubcommand(sc=>sc.setName('questions-publier').setDescription('Publier les réponses anonymes et ouvrir les notes /10').addBooleanOption(o=>o.setName('forcer').setDescription('Publier avec des réponses manquantes')))
- .addSubcommand(sc=>sc.setName('questions-notes-statut').setDescription('Suivi des notes reçues pour les réponses aux questions'))
  .addSubcommand(sc=>sc.setName('questions-notes-rappels').setDescription('Relancer en MP les juges qui n’ont pas tout noté'))
  .addSubcommand(sc=>sc.setName('questions-notes-fermer').setDescription('Fermer les notes de la manche des questions').addBooleanOption(o=>o.setName('forcer').setDescription('Clôturer même s’il manque des notes')))
  .addSubcommand(sc=>sc.setName('questions-classement').setDescription('Moyenne /10 par candidate pour les réponses aux questions'))
@@ -70,6 +68,107 @@ function gradeMenu(stage,subs){return new ActionRowBuilder().addComponents(new S
  .addOptions(subs.map(s=>({label:`Candidate n°${s.number}`,value:s.candidate_id,description:'Attribuer ou modifier sa note /10'}))));}
 const trim=(s,n=1850)=>String(s||'').slice(0,n);
 async function privateReply(i,msg){return i.editReply(trim(msg,1950));}
+
+// Envoyer autant de messages éphémères que nécessaire pour voir tout le suivi,
+// sans jamais publier les identités, réponses ou notes nominatives dans un salon.
+async function privateSuivi(i,sections){
+ const blocks=[];
+ for(const section of sections){
+  let chunk='';
+  for(const line of String(section).split('\n')){
+   if(line.length>1700){
+    if(chunk){blocks.push(chunk);chunk='';}
+    for(let offset=0;offset<line.length;offset+=1700)blocks.push(line.slice(offset,offset+1700));
+    continue;
+   }
+   if(chunk && chunk.length+line.length+1>1750){blocks.push(chunk);chunk='';}
+   chunk+=(chunk?'\n':'')+line;
+  }
+  if(chunk)blocks.push(chunk);
+ }
+ if(!blocks.length)blocks.push('Aucune information pour le moment.');
+ await i.editReply({content:blocks[0],allowedMentions:{parse:[]}});
+ for(const content of blocks.slice(1))await i.followUp({content,flags:E,allowedMentions:{parse:[]}});
+ return true;
+}
+function suiviEtat(st){
+ if(!st)return 'pas encore créée';
+ if(st.status==='draft')return '🕒 préparée (pas lancée)';
+ if(st.kind==='questions' && st.status==='published' && !st.questions_posted)return '📨 questions fermées · réponses en attente';
+ if(st.status==='collect')return st.kind==='questions'?'✉️ questions et réponses en cours':'✍️ réponses en cours';
+ if(st.status==='published')return '⭐ notes ouvertes';
+ return st.status==='closed'?'🔒 terminée':st.status;
+}
+function suiviNom(p){return `${p.number?`N°${p.number}`:'Sans n°'} — <@${p.user_id}>${p.active?'':' · éliminée'}`;}
+// Lecture seule. Aucune table créée, aucune inscription ou note modifiée.
+async function afficherSuivi(i){
+ const [candidates,judges,allStages]=await Promise.all([
+  db.members(guild,'candidate'),db.members(guild,'judge'),
+  db.q("SELECT id,title,status,kind,questions_posted FROM rc_stages WHERE guild_id=$1 ORDER BY id",[guild])
+ ]);
+ const stages=allStages.rows,latest=stages[stages.length-1],
+  presentation=[...stages].reverse().find(s=>s.kind==='text'),
+  questionsStage=[...stages].reverse().find(s=>s.kind==='questions');
+ const sections=[`👑 **LA REINE DES CŒURS — SUIVI COMPLET**\n🔐 Privé : visible seulement par Esty et les co-administrateurs.\n📍 Étape actuelle : **${latest?latest.title:'Inscriptions / préparation'}** — ${suiviEtat(latest)}\n👩 **${candidates.filter(c=>c.active).length}/${candidates.length}** candidates encore en jeu · ⚖️ **${judges.length}** juges (infiltré compris)\n✅ Terminé · ⏳ En attente · ➖ Pas concerné / pas encore ouvert · ❌ Manquant après clôture`];
+ if(!presentation){
+  sections.push('💌 **1. PRÉSENTATIONS**\n🕒 Aucune épreuve de présentation créée.\n' +
+   (candidates.map(c=>`➖ ${suiviNom(c)}`).join('\n')||'_Aucune candidate inscrite._'));
+ }else{
+  const [submissions,ratings]=await Promise.all([db.submissions(presentation.id),db.grades(presentation.id)]);
+  const received=new Set(submissions.map(x=>x.candidate_id));
+  const total=candidates.filter(c=>received.has(c.user_id)).length;
+  const candidatelist=candidates.map(c=>{
+   const done=received.has(c.user_id),icon=done?'✅':presentation.status==='draft'?'➖':['published','closed'].includes(presentation.status)?'❌':'⏳';
+   return `${icon} ${suiviNom(c)} · ${done?'texte reçu':'texte non reçu'}`;
+  }).join('\n')||'_Aucune candidate._';
+  sections.push(`💌 **1. PRÉSENTATIONS — ${presentation.title}**\n${suiviEtat(presentation)} · **${total}/${candidates.length}** textes reçus\n${candidatelist}\n${presentation.status==='collect'?'💡 Relances : `/reine rappels`':''}`);
+  let bulletins=0,doneNotes=0,expectedNotes=0;
+  const judgeslines=judges.map(j=>{
+   const expected=submissions.filter(x=>x.candidate_id!==j.user_id);
+   const graded=expected.filter(x=>ratings.some(g=>g.judge_id===j.user_id&&g.candidate_id===x.candidate_id)).length;
+   expectedNotes+=expected.length;doneNotes+=graded;
+   if(expected.length&&graded===expected.length)bulletins++;
+   const icon=['draft','collect'].includes(presentation.status)||!expected.length?'➖':graded===expected.length?'✅':presentation.status==='closed'?'❌':'⏳';
+   return `${icon} <@${j.user_id}> — **${graded}/${expected.length} notes**${expected.some(x=>x.candidate_id===j.user_id)?' (auto-note interdite)':''}`;
+  });
+  sections.push(`⭐ **VOTES — PRÉSENTATIONS**\n${suiviEtat(presentation)} · **${doneNotes}/${expectedNotes}** notes enregistrées · **${bulletins}/${judges.length}** juges ayant tout noté\n${judgeslines.join('\n')||'_Aucun juge inscrit._'}\n${presentation.status==='published'?'💡 Notes en cours, utiliser `/reine suivi` pour actualiser.':''}`);
+ }
+ if(!questionsStage){
+  sections.push('💌 **2. QUESTIONS / RÉPONSES / VOTES**\n🕒 Manche non créée. Elle apparaîtra ici après `/coeur questions-preparer`.');
+ }else{
+  const [questions,grades]=await Promise.all([db.questions(questionsStage.id),db.questionGrades(questionsStage.id)]);
+  const answered=questions.filter(x=>x.answer!==null);
+  const published=Boolean(questionsStage.questions_posted);
+  const current=questionsStage.status;
+  const askedJudges=judges.map(j=>{
+   const asked=questions.filter(q=>q.judge_id===j.user_id).length;
+   // Le quota de 3 est un maximum, pas une obligation.
+   const icon=current==='draft'?'➖':current==='collect'?(asked===3?'✅':'⏳'):asked?'✅':'➖';
+   return `${icon} <@${j.user_id}> — **${asked}/3 questions**${current!=='collect'?' (envoi terminé)':''}`;
+  });
+  sections.push(`❓ **2. QUESTIONS POSÉES**\n${suiviEtat(questionsStage)} · **${questions.length}/${judges.length*3}** questions possibles\n${askedJudges.join('\n')||'_Aucun juge._'}\n*Chaque juge peut poser jusqu’à 3 questions, sans obligation d’utiliser tout son quota.*`);
+  const ansLines=candidates.map(c=>{
+   const qs=questions.filter(q=>q.candidate_id===c.user_id),done=qs.filter(q=>q.answer!==null).length;
+   const icon=!qs.length?'➖':done===qs.length?'✅':published||current==='closed'?'❌':'⏳';
+   return `${icon} ${suiviNom(c)} — **${done}/${qs.length} réponses**${!qs.length?' (aucune question reçue)':''}`;
+  });
+  sections.push(`💬 **RÉPONSES DES CANDIDATES**\n**${answered.length}/${questions.length}** réponses rendues\n${ansLines.join('\n')||'_Aucune candidate._'}\n${!published&&questions.length?'💡 Relances : `/coeur questions-rappels`':''}`);
+  const notesJudges=judges.map(j=>{
+   const possible=answered.filter(q=>q.candidate_id!==j.user_id),done=possible.filter(q=>grades.some(g=>g.judge_id===j.user_id&&Number(g.question_id)===Number(q.id))).length;
+   const icon=!published||!possible.length?'➖':done===possible.length?'✅':current==='closed'?'❌':'⏳';
+   return {line:`${icon} <@${j.user_id}> — **${done}/${possible.length} notes**${answered.some(q=>q.candidate_id===j.user_id)?' (auto-note interdite)':''}`,done,expected:possible.length};
+  });
+  const voteDone=notesJudges.reduce((n,x)=>n+x.done,0),voteTotal=notesJudges.reduce((n,x)=>n+x.expected,0),
+   complete=notesJudges.filter(x=>x.expected>0&&x.done===x.expected).length;
+  sections.push(`⭐ **VOTES — RÉPONSES AUX QUESTIONS**\n${published?suiviEtat(questionsStage):'🕒 notation pas encore ouverte'} · **${voteDone}/${voteTotal}** notes enregistrées · **${complete}/${judges.length}** juges ayant tout noté\n${notesJudges.map(x=>x.line).join('\n')||'_Aucun juge._'}\n${published&&current==='published'?'💡 Relances : `/coeur questions-notes-rappels`':''}`);
+  if(questions.length){
+   sections.push(`🔎 **DÉTAIL DES QUESTIONS (${questions.length})**\n${questions.map(q=>`${q.answer!==null?'✅':'⏳'} Question ${q.id} · <@${q.judge_id}> → ${q.candidate_number?'N°'+q.candidate_number:'candidate'} <@${q.candidate_id}>`).join('\n')}`);
+  }
+ }
+ sections.push('🔐 **Rappel :** ce suivi affiche les pseudos pour Esty et Tropi uniquement.\nLes notes ne sont pas publiées automatiquement et les éliminations restent manuelles.');
+ return privateSuivi(i,sections);
+}
+
 async function sendJudge(content){const cfg=await db.settings(guild);if(!cfg.judge_channel)throw Error('Configure d’abord `/reine salon-juges`.');const c=await bot.channels.fetch(cfg.judge_channel);if(!c?.isTextBased())throw Error('Salon des juges inaccessible.');return c.send({content:trim(content,1950),allowedMentions:{parse:[]}});}
 async function sendAnimation(content){const c=await bot.channels.fetch(process.env.ANIMATION_CHANNEL_ID);if(!c?.isTextBased())throw Error('Salon animation inaccessible.');return c.send({content:trim(content,1950),allowedMentions:{parse:[]}});}
 async function dm(user,content,components=[]){try{const u=await bot.users.fetch(user);await u.send({content:trim(content,1950),components,allowedMentions:{parse:[]}});return true;}catch(e){console.warn('MP non envoyé',user,e.message);return false;}}
@@ -110,12 +209,13 @@ async function handle(i){
   if(sub==='statut'){
    const cfg=await db.settings(guild),c=await db.members(guild,'candidate'),j=await db.members(guild,'judge');return privateReply(i,`👑 **La Reine des Cœurs**\nCandidates : ${c.filter(x=>x.active).length}/${c.length} actives · Juges : ${j.length}\nInscriptions : ${cfg.registrations_closed?'fermées':'ouvertes'}\nSalon juges : ${cfg.judge_channel?`<#${cfg.judge_channel}>`:'à configurer'}\nDernière épreuve : ${stage?`${stage.title} (${stage.status})`:'aucune'}`);
   }
-  if(sub==='aide')return privateReply(i,'👑 **Commandes principales**\nConfiguration : `/reine admin-ajouter`, `salon-juges`, `role-juges`, `role-gagnante`\nInscriptions : `juge-ajouter`, `candidate-ajouter`, les commandes `-retirer`, `inscriptions-fermer`\nÉpreuves : `epreuve-creer`, `epreuve-lancer`, `rappels`, `epreuve-publier`, `notes-statut`, `notes-fermer`\nRésultats : `classement`, `resultats-publier`, `eliminer`, `finale`\nQuestions et infiltré : `/coeur` (`questions-lancer`, `questions-rappels`, `infiltre-ajouter`)\nSecrets : `identites`, `/reine archives participants`, `/reine archives secrets`, `/reine archives texte`, `/reine archives notes-details`, `statut`\nRéinitialisation : `reinitialiser`');
+  if(sub==='suivi')return afficherSuivi(i);
+  if(sub==='aide')return privateReply(i,'👑 **Aide — La Reine des Cœurs**\nSuivi complet des candidates, questions et notes : `/reine suivi`\nPrésentations : `/coeur presentation-preparer`, `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`\nQuestions : `/coeur questions-preparer`, `/coeur questions-lancer`, `/coeur questions-rappels`, `/coeur questions-fermer`, `/coeur questions-publier`, `/coeur questions-notes-rappels`, `/coeur questions-notes-fermer`\nÉliminations : `/reine eliminer` (au choix de Tropi).');
   if(sub==='reinitialiser'){
    if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty peut remettre à zéro la compétition.');if(i.options.getString('confirmation')!=='EFFACER REINE')return privateReply(i,'❌ Annulé. Saisis exactement **EFFACER REINE**.');await db.reset(guild);return privateReply(i,'✅ Épreuves, réponses, notes et inscriptions Reine effacées. Configuration et admins conservés. Aucun dossier Problèmes ou Don Juan touché.');
   }
-  if(!stage&&['epreuve-lancer','rappels','epreuve-publier','notes-statut','notes-fermer','classement','resultats-publier','secrets','eliminer','finale'].includes(sub) && !['finale','eliminer'].includes(sub))return privateReply(i,'Crée d’abord une épreuve avec `/reine epreuve-creer`.');
-  if(stage?.kind==='questions' && ['epreuve-lancer','rappels','epreuve-publier','notes-statut','notes-fermer','classement','resultats-publier','secrets','texte','notes-details'].includes(sub))return privateReply(i,'Cette manche est celle des questions : utilise les commandes `/coeur questions-...`.');
+  if(!stage&&['epreuve-lancer','rappels','epreuve-publier','notes-fermer','classement','resultats-publier','secrets','eliminer','finale'].includes(sub) && !['finale','eliminer'].includes(sub))return privateReply(i,'Crée d’abord une épreuve avec `/reine epreuve-creer`.');
+  if(stage?.kind==='questions' && ['epreuve-lancer','rappels','epreuve-publier','notes-fermer','classement','resultats-publier','secrets','texte','notes-details'].includes(sub))return privateReply(i,'Cette manche est celle des questions : utilise les commandes `/coeur questions-...`.');
   if(sub==='epreuve-lancer'){
    if(stage.status!=='draft')return privateReply(i,'Cette épreuve a déjà été lancée.');const active=await db.members(guild,'candidate',true);if(!active.length)throw Error('Aucune candidate.');
    await db.setStageStatus(guild,stage.id,'draft','collect');let ok=0;
@@ -138,9 +238,6 @@ async function handle(i){
    for(const subm of subs){const pieces=subm.answer.match(/[\s\S]{1,1650}/g)||[];for(let k=0;k<pieces.length;k++)await sendJudge(`💌 **CANDIDATE N°${subm.number}**${pieces.length>1?` — partie ${k+1}/${pieces.length}`:''}\n${pieces[k]}`);}
    const cfgChannel=await bot.channels.fetch(cfg.judge_channel);await cfgChannel.send({content:'⚖️ **JUGES — choisissez une candidate et attribuez-lui une note de 0 à 10.**\nRecommencez pour chaque texte ; vous pouvez modifier une note tant que le vote est ouvert.',components:[gradeMenu(stage,subs)],allowedMentions:{parse:[]}});
    return privateReply(i,`✅ ${subs.length} texte(s) publiés anonymement. Notes ouvertes dans <#${cfg.judge_channel}>.`);
-  }
-  if(sub==='notes-statut'){
-   const subs=await db.submissions(stage.id),judges=await db.members(guild,'judge'),grades=await db.grades(stage.id);return privateReply(i,`⚖️ **Notes de ${stage.title}** (${stage.status})\n${judges.map(j=>`<@${j.user_id}> : ${grades.filter(x=>x.judge_id===j.user_id).length}/${subs.filter(x=>x.candidate_id!==j.user_id).length} notes${subs.some(x=>x.candidate_id===j.user_id)?' (son propre texte est exclu)':''}`).join('\n')||'Aucun juge inscrit.'}`);
   }
   if(sub==='notes-fermer'){
    if(stage.status!=='published')return privateReply(i,'Les notes ne sont pas ouvertes.');const subs=await db.submissions(stage.id),judges=await db.members(guild,'judge'),grades=await db.grades(stage.id);const missing=judges.reduce((n,j)=>n+subs.filter(s=>s.candidate_id!==j.user_id&&!grades.some(x=>x.judge_id===j.user_id&&x.candidate_id===s.candidate_id)).length,0);
@@ -296,12 +393,6 @@ async function handleExtra(i){
   for(const j of judges)if(await dm(j.user_id,`👑 **La Reine des Cœurs — 3 questions par juge**\nTu peux adresser jusqu’à **trois questions au total** aux candidates de ton choix, en indiquant leur numéro anonyme. Clique à nouveau sur le bouton pour chaque question. Impossible de te questionner toi-même si tu es infiltré.`,[askButton(st.id)]))ok++;
   return privateReply(i,`✅ Questions ouvertes. ${ok}/${judges.length} MP envoyés aux juges.`);
  }
- if(sub==='questions-statut'){
-  const qs=await db.questions(st.id),judges=await db.members(guild,'judge',true),candidates=await db.members(guild,'candidate',true);
-  const lines=judges.map(j=>`<@${j.user_id}> : ${qs.filter(q=>q.judge_id===j.user_id).length}/3 question(s)`);
-  const candidatesLines=candidates.map(c=>{const his=qs.filter(q=>q.candidate_id===c.user_id);return `N°${c.number}: ${his.filter(q=>q.answer!==null).length}/${his.length} réponse(s)`;});
-  return privateReply(i,`💌 **Questions — ${st.status}**\n${qs.length} envoyées, ${qs.filter(q=>q.answer!==null).length} réponses reçues.\n**Juges :**\n${lines.join('\n')||'Aucun'}\n**Candidates :**\n${candidatesLines.join('\n')||'Aucune'}`);
- }
  if(sub==='questions-rappels'){
   if(!['collect','published'].includes(st.status)||st.questions_posted)return privateReply(i,'La collecte des questions et des réponses est terminée.');
   const qs=await db.questions(st.id);let judges=0,candidates=0;
@@ -336,14 +427,7 @@ async function handleExtra(i){
    }else await sendJudge('*Sans réponse : aucune note possible pour cette question.*');
   }
   await db.markQuestionsPosted(guild,st.id);
-  return privateReply(i,`✅ ${qs.length} question(s) publiées, ${qs.length-missing.length} réponse(s) ouvertes à la notation sur 10. Suivi : \`/coeur questions-notes-statut\`.`);
- }
- if(sub==='questions-notes-statut'){
-  if(!st.questions_posted)return privateReply(i,'Publie d’abord les réponses avec `/coeur questions-publier`.');
-  const qs=(await db.questions(st.id)).filter(q=>q.answer!==null),judges=await db.members(guild,'judge',true),grades=await db.questionGrades(st.id);
-  const expected=expectedQuestionGrades(judges,qs);
-  const lines=expected.map(({judge,questions})=>`<@${judge.user_id}> : ${grades.filter(g=>g.judge_id===judge.user_id).length}/${questions.length} notes${questions.some(q=>q.candidate_id===judge.user_id)?' (sa réponse exclue)':''}`);
-  return privateReply(i,`⭐ **Notes des réponses — ${st.title}** (${st.status})\n${lines.join('\n')||'Aucun juge.'}`);
+  return privateReply(i,`✅ ${qs.length} question(s) publiées, ${qs.length-missing.length} réponse(s) ouvertes à la notation sur 10. Suivi : \`/reine suivi\`.`);
  }
  if(sub==='questions-notes-rappels'){
   if(st.status!=='published'||!st.questions_posted)return privateReply(i,'Les notes des questions ne sont pas ouvertes.');
