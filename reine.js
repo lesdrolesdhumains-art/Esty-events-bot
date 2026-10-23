@@ -38,6 +38,31 @@ const command=new SlashCommandBuilder().setName('reine').setDescription('👑 La
  .addSubcommand(s=>s.setName('statut').setDescription('Résumé privé du jeu et des étapes'))
  .addSubcommand(s=>s.setName('aide').setDescription('Guide rapide des commandes'))
  .addSubcommand(s=>s.setName('reinitialiser').setDescription('Remettre à zéro UNIQUEMENT La Reine des Cœurs').addStringOption(o=>o.setName('confirmation').setDescription('Écrire EFFACER REINE').setRequired(true)));
+// Extensions sans changer les 25 entrées /reine existantes (limite de Discord).
+const extraCommand=new SlashCommandBuilder().setName('coeur').setDescription('👑 Présentation, questions et homme infiltré')
+ .addSubcommand(sc=>sc.setName('presentation-preparer').setDescription('Préparer la première épreuve validée'))
+ .addSubcommand(sc=>sc.setName('infiltre-ajouter').setDescription('Inscrire un homme comme candidat ET juge').addUserOption(o=>o.setName('membre').setDescription('Homme infiltré').setRequired(true)))
+ .addSubcommand(sc=>sc.setName('infiltre-retirer').setDescription('Retirer le double rôle (conserve sa candidature)').addUserOption(o=>o.setName('membre').setDescription('Infiltré').setRequired(true)))
+ .addSubcommand(sc=>sc.setName('questions-preparer').setDescription('Préparer la manche de 3 questions par juge'))
+ .addSubcommand(sc=>sc.setName('questions-lancer').setDescription('Inviter les juges à poser leurs questions en MP'))
+ .addSubcommand(sc=>sc.setName('questions-statut').setDescription('Voir les questions posées et les réponses reçues'))
+ .addSubcommand(sc=>sc.setName('questions-rappels').setDescription('Relancer les juges et candidates en attente'))
+ .addSubcommand(sc=>sc.setName('questions-fermer').setDescription('Fermer la collecte des questions, laisser répondre'))
+ .addSubcommand(sc=>sc.setName('questions-publier').setDescription('Publier les réponses anonymes et ouvrir les notes /10').addBooleanOption(o=>o.setName('forcer').setDescription('Publier avec des réponses manquantes')))
+ .addSubcommand(sc=>sc.setName('questions-notes-statut').setDescription('Suivi des notes reçues pour les réponses aux questions'))
+ .addSubcommand(sc=>sc.setName('questions-notes-rappels').setDescription('Relancer en MP les juges qui n’ont pas tout noté'))
+ .addSubcommand(sc=>sc.setName('questions-notes-fermer').setDescription('Fermer les notes de la manche des questions').addBooleanOption(o=>o.setName('forcer').setDescription('Clôturer même s’il manque des notes')))
+ .addSubcommand(sc=>sc.setName('questions-classement').setDescription('Moyenne /10 par candidate pour les réponses aux questions'))
+ .addSubcommand(sc=>sc.setName('questions-resultats-publier').setDescription('Publier le classement anonyme de la manche des questions'))
+ .addSubcommand(sc=>sc.setName('questions-secrets').setDescription('Voir toutes les questions/réponses et leurs identités en privé'))
+ .addSubcommand(sc=>sc.setName('classement-precedent').setDescription('Retrouver le classement de la dernière épreuve notée'));
+function askButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:qask:${id}`).setLabel('💌 Poser une question (3 maximum)').setStyle(ButtonStyle.Primary));}
+function questionReplyButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:qreply:${id}`).setLabel('✍️ Répondre à cette question').setStyle(ButtonStyle.Primary));}
+function questionGradeButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:qrate:${id}`).setLabel('⭐ Noter cette réponse /10').setStyle(ButtonStyle.Primary));}
+function questionRankText(rows,names=false){return rows.map((r,i)=>`${i+1}. **N°${r.number}**${names?` (<@${r.user_id}>)`:''} — ${r.moyenne===null?'non évaluée (aucune note)':`${r.moyenne}/10 (${r.questions} réponse(s), ${r.notes} note(s))`}${r.active?'':' · éliminée'}`).join('\n')||'Aucune candidate.';}
+function expectedQuestionGrades(judges,answered){return judges.map(j=>({judge:j,questions:answered.filter(q=>q.candidate_id!==j.user_id)}));}
+const PRESENTATION_TITLE='👑 Qui se cache derrière la couronne ?';
+const PRESENTATION_PROMPT='Présente-toi anonymement au jury : ta personnalité, tes qualités, tes petits défauts, tes contradictions, ta vision de l’amour et ce qui te rend différente. Sois naturelle, sincère, drôle ou mystérieuse selon ton caractère. Longueur conseillée : 150 à 300 mots. Ne donne pas ton pseudo ni d’indices permettant de deviner ton identité.';
 function textField(id,label,style,maxLen,required=true){return new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setMaxLength(maxLen).setRequired(required));}
 function answerButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:answer:${id}`).setLabel('✍️ Envoyer ou modifier mon texte').setStyle(ButtonStyle.Primary));}
 function gradeMenu(stage,subs){return new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
@@ -52,6 +77,7 @@ async function judgeRole(user,add){const cfg=await db.settings(guild);if(!cfg.ju
 function rankText(rows,includeNames=false){return rows.map((r,k)=>`${k+1}. **N°${r.number}**${includeNames?` (<@${r.user_id}>)`:''} — ${r.moyenne===null?'aucune note':`${r.moyenne}/10 (${r.notes} notes)`}${r.active?'':' · éliminée'}`).join('\n')||'Aucune note.';}
 async function admin(i){return i.user.id===owner||await db.isAdmin(guild,i.user.id);}
 async function handle(i){
+ if(i.isChatInputCommand() && i.commandName==='coeur')return handleExtra(i);
  if(i.isChatInputCommand()&&i.commandName==='reine'){
   if(i.guildId!==guild)return i.reply({content:'Commande réservée au serveur LDH.',flags:E});
   if(!await admin(i))return i.reply({content:'🔒 Seuls Esty et ses administrateurs peuvent utiliser ces commandes.',flags:E});
@@ -70,7 +96,7 @@ async function handle(i){
     await db.addMember(guild,u.id,kind);if(kind==='judge')await judgeRole(u.id,true);
     return privateReply(i,`✅ ${u.username} ajouté${kind==='candidate'?'e comme candidate':' au jury'}.`);
    }
-   const removed=await db.removeMember(guild,u.id,kind);if(kind==='judge'&&removed)await judgeRole(u.id,false);
+   const wasDual=await db.isDualJudge(guild,u.id);const removed=await db.removeMember(guild,u.id,kind);if(removed&&(kind==='judge'||(kind==='candidate'&&wasDual)))await judgeRole(u.id,false);
    return privateReply(i,removed?`✅ ${u.username} retiré${kind==='candidate'?'e':''}.`:'Cette personne n’était pas inscrite dans cette catégorie.');
   }
   if(sub==='inscriptions-fermer'){const n=await db.closeRegistrations(guild);return privateReply(i,`🔒 Inscriptions clôturées ! ${n} candidates ont reçu un numéro aléatoire secret. Consulte \`/reine identites\`.`);}
@@ -84,11 +110,12 @@ async function handle(i){
   if(sub==='statut'){
    const cfg=await db.settings(guild),c=await db.members(guild,'candidate'),j=await db.members(guild,'judge');return privateReply(i,`👑 **La Reine des Cœurs**\nCandidates : ${c.filter(x=>x.active).length}/${c.length} actives · Juges : ${j.length}\nInscriptions : ${cfg.registrations_closed?'fermées':'ouvertes'}\nSalon juges : ${cfg.judge_channel?`<#${cfg.judge_channel}>`:'à configurer'}\nDernière épreuve : ${stage?`${stage.title} (${stage.status})`:'aucune'}`);
   }
-  if(sub==='aide')return privateReply(i,'👑 **Commandes principales**\nConfiguration : `/reine admin-ajouter`, `salon-juges`, `role-juges`, `role-gagnante`\nInscriptions : `juge-ajouter`, `candidate-ajouter`, les commandes `-retirer`, `inscriptions-fermer`\nÉpreuves : `epreuve-creer`, `epreuve-lancer`, `rappels`, `epreuve-publier`, `notes-statut`, `notes-fermer`\nRésultats : `classement`, `resultats-publier`, `eliminer`, `finale`\nSecrets : `identites`, `/reine archives participants`, `/reine archives secrets`, `/reine archives texte`, `/reine archives notes-details`, `statut`\nRéinitialisation : `reinitialiser`');
+  if(sub==='aide')return privateReply(i,'👑 **Commandes principales**\nConfiguration : `/reine admin-ajouter`, `salon-juges`, `role-juges`, `role-gagnante`\nInscriptions : `juge-ajouter`, `candidate-ajouter`, les commandes `-retirer`, `inscriptions-fermer`\nÉpreuves : `epreuve-creer`, `epreuve-lancer`, `rappels`, `epreuve-publier`, `notes-statut`, `notes-fermer`\nRésultats : `classement`, `resultats-publier`, `eliminer`, `finale`\nQuestions et infiltré : `/coeur` (`questions-lancer`, `questions-rappels`, `infiltre-ajouter`)\nSecrets : `identites`, `/reine archives participants`, `/reine archives secrets`, `/reine archives texte`, `/reine archives notes-details`, `statut`\nRéinitialisation : `reinitialiser`');
   if(sub==='reinitialiser'){
    if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty peut remettre à zéro la compétition.');if(i.options.getString('confirmation')!=='EFFACER REINE')return privateReply(i,'❌ Annulé. Saisis exactement **EFFACER REINE**.');await db.reset(guild);return privateReply(i,'✅ Épreuves, réponses, notes et inscriptions Reine effacées. Configuration et admins conservés. Aucun dossier Problèmes ou Don Juan touché.');
   }
   if(!stage&&['epreuve-lancer','rappels','epreuve-publier','notes-statut','notes-fermer','classement','resultats-publier','secrets','eliminer','finale'].includes(sub) && !['finale','eliminer'].includes(sub))return privateReply(i,'Crée d’abord une épreuve avec `/reine epreuve-creer`.');
+  if(stage?.kind==='questions' && ['epreuve-lancer','rappels','epreuve-publier','notes-statut','notes-fermer','classement','resultats-publier','secrets','texte','notes-details'].includes(sub))return privateReply(i,'Cette manche est celle des questions : utilise les commandes `/coeur questions-...`.');
   if(sub==='epreuve-lancer'){
    if(stage.status!=='draft')return privateReply(i,'Cette épreuve a déjà été lancée.');const active=await db.members(guild,'candidate',true);if(!active.length)throw Error('Aucune candidate.');
    await db.setStageStatus(guild,stage.id,'draft','collect');let ok=0;
@@ -113,10 +140,10 @@ async function handle(i){
    return privateReply(i,`✅ ${subs.length} texte(s) publiés anonymement. Notes ouvertes dans <#${cfg.judge_channel}>.`);
   }
   if(sub==='notes-statut'){
-   const subs=await db.submissions(stage.id),judges=await db.members(guild,'judge'),grades=await db.grades(stage.id);return privateReply(i,`⚖️ **Notes de ${stage.title}** (${stage.status})\n${judges.map(j=>`<@${j.user_id}> : ${grades.filter(x=>x.judge_id===j.user_id).length}/${subs.length} notes`).join('\n')||'Aucun juge inscrit.'}`);
+   const subs=await db.submissions(stage.id),judges=await db.members(guild,'judge'),grades=await db.grades(stage.id);return privateReply(i,`⚖️ **Notes de ${stage.title}** (${stage.status})\n${judges.map(j=>`<@${j.user_id}> : ${grades.filter(x=>x.judge_id===j.user_id).length}/${subs.filter(x=>x.candidate_id!==j.user_id).length} notes${subs.some(x=>x.candidate_id===j.user_id)?' (son propre texte est exclu)':''}`).join('\n')||'Aucun juge inscrit.'}`);
   }
   if(sub==='notes-fermer'){
-   if(stage.status!=='published')return privateReply(i,'Les notes ne sont pas ouvertes.');const subs=await db.submissions(stage.id),judges=await db.members(guild,'judge'),grades=await db.grades(stage.id);const missing=judges.reduce((n,j)=>n+subs.filter(s=>!grades.some(x=>x.judge_id===j.user_id&&x.candidate_id===s.candidate_id)).length,0);
+   if(stage.status!=='published')return privateReply(i,'Les notes ne sont pas ouvertes.');const subs=await db.submissions(stage.id),judges=await db.members(guild,'judge'),grades=await db.grades(stage.id);const missing=judges.reduce((n,j)=>n+subs.filter(s=>s.candidate_id!==j.user_id&&!grades.some(x=>x.judge_id===j.user_id&&x.candidate_id===s.candidate_id)).length,0);
    if(missing&&!i.options.getBoolean('forcer'))return privateReply(i,`⏳ Il reste **${missing} notes** manquantes. Utilise \`/reine notes-fermer forcer:true\` seulement si tu assumes une clôture incomplète.`);
    await db.setStageStatus(guild,stage.id,'published','closed');return privateReply(i,`🔒 Notes clôturées. ${grades.length} note(s) reçues, ${missing} manquante(s). Consulte \`/reine classement\`.`);
   }
@@ -161,8 +188,9 @@ async function handle(i){
  }
  if(i.isStringSelectMenu()&&/^rc:choose:\d+$/.test(i.customId)){
   const id=Number(i.customId.split(':')[2]),st=await db.stage(guild,id),j=await db.member(guild,i.user.id);
-  if(!st||st.status!=='published'||!j||j.kind!=='judge')return i.reply({content:'🔒 Notes fermées ou accès réservé aux juges.',flags:E});
+  if(!st||st.status!=='published'||!j||(j.kind!=='judge'&&!await db.isDualJudge(guild,i.user.id)))return i.reply({content:'🔒 Notes fermées ou accès réservé aux juges.',flags:E});
   const target=i.values[0],entry=await db.member(guild,target),subs=await db.submissions(id);
+  if(target===i.user.id)return i.reply({content:'👑 Tu ne peux pas noter ton propre texte, mais tu peux noter toutes les autres candidates.',flags:E});
   if(!entry||!subs.some(s=>s.candidate_id===target))return i.reply({content:'Candidate non disponible.',flags:E});
   const modal=new ModalBuilder().setCustomId(`rc:grade:${id}:${target}`).setTitle(`Note — candidate n°${entry.number}`)
    .addComponents(textField('note','Note sur 10 (0 à 10)',TextInputStyle.Short,2),textField('avis','Avis facultatif (secret)',TextInputStyle.Paragraph,500,false));
@@ -173,7 +201,186 @@ async function handle(i){
   const [, , id, target]=i.customId.split(':'),raw=i.fields.getTextInputValue('note').trim();if(!/^(10|[0-9])$/.test(raw))return i.reply({content:'❌ La note doit être un entier de 0 à 10.',flags:E});
   const comment=i.fields.getTextInputValue('avis').trim();await db.setGrade(guild,Number(id),i.user.id,target,Number(raw),comment);await i.reply({content:`✅ Note **${raw}/10** enregistrée ! Choisis une autre candidate dans le menu pour continuer.`,flags:E});return true;
  }
+ if(i.isButton()&&/^rc:qrate:\d+$/.test(i.customId)){
+  const id=Number(i.customId.split(':')[2]),row=await db.question(guild,id),member=await db.member(guild,i.user.id);
+  if(!row||row.kind!=='questions'||row.status!=='published'||!row.answer)return i.reply({content:'Cette réponse n’est pas ouverte à la notation.',flags:E});
+  const st=await db.stage(guild,row.stage_id);
+  if(!st.questions_posted||!member|| (member.kind!=='judge' && !await db.isDualJudge(guild,i.user.id)))return i.reply({content:'Notes non ouvertes ou accès réservé au jury.',flags:E});
+  if(row.candidate_id===i.user.id)return i.reply({content:'🕵️ Tu ne peux pas noter ta propre réponse.',flags:E});
+  const modal=new ModalBuilder().setCustomId(`rc:qscore:${id}`).setTitle(`Note — réponse n°${id}`)
+   .addComponents(textField('note','Note sur 10 (0 à 10)',TextInputStyle.Short,2),textField('avis','Avis facultatif (secret)',TextInputStyle.Paragraph,500,false));
+  const previous=(await db.questionGrades(row.stage_id)).find(g=>Number(g.question_id)===id && g.judge_id===i.user.id);
+  if(previous){modal.components[0].components[0].setValue(String(previous.grade));if(previous.comment)modal.components[1].components[0].setValue(previous.comment);}
+  await i.showModal(modal);return true;
+ }
+ if(i.isModalSubmit()&&/^rc:qscore:\d+$/.test(i.customId)){
+  const id=Number(i.customId.split(':')[2]),raw=i.fields.getTextInputValue('note').trim();
+  if(!/^(10|[0-9])$/.test(raw))return i.reply({content:'La note doit être un nombre entier de 0 à 10.',flags:E});
+  await db.gradeQuestion(guild,id,i.user.id,Number(raw),i.fields.getTextInputValue('avis').trim());
+  return i.reply({content:`✅ Note **${raw}/10** enregistrée pour cette réponse. Tu peux la modifier tant que les notes sont ouvertes.`,flags:E});
+ }
+ if(i.isButton()&&/^rc:qask:\d+$/.test(i.customId)){
+  const st=await db.stage(guild,Number(i.customId.split(':')[2]));
+  if(!st||st.kind!=='questions'||st.status!=='collect'||!(await db.members(guild,'judge',true)).some(j=>j.user_id===i.user.id))return i.reply({content:'Questions fermées ou accès réservé au jury.',flags:E});
+  const count=(await db.questions(st.id)).filter(q=>q.judge_id===i.user.id).length;
+  if(count>=3)return i.reply({content:'Tu as déjà posé tes trois questions.',flags:E});
+  const modal=new ModalBuilder().setCustomId(`rc:qnew:${st.id}`).setTitle('Question '+(count+1)+'/3').addComponents(
+   textField('numero','Numéro de la candidate (1 à 15)',TextInputStyle.Short,2),
+   textField('question','Ta question (800 caractères max)',TextInputStyle.Paragraph,800));
+  await i.showModal(modal);return true;
+ }
+ if(i.isModalSubmit()&&/^rc:qnew:\d+$/.test(i.customId)){
+  const stageId=Number(i.customId.split(':')[2]),raw=i.fields.getTextInputValue('numero').trim();
+  if(!/^(?:[1-9]|1[0-5])$/.test(raw))return i.reply({content:'Numéro invalide (1 à 15).',flags:E});
+  const candidate=(await db.members(guild,'candidate',true)).find(x=>x.number===Number(raw));
+  if(!candidate)return i.reply({content:'Aucune candidate active ne porte ce numéro.',flags:E});
+  const questionText=i.fields.getTextInputValue('question').trim();
+  if(!questionText)return i.reply({content:'La question est vide.',flags:E});
+  const row=await db.createQuestion(guild,stageId,i.user.id,candidate.user_id,questionText);
+  const ok=await dm(candidate.user_id,`💌 **Question du jury — n°${candidate.number}**\n\n${questionText}\n\nRéponds avec le bouton ci-dessous. Ton pseudo restera caché dans le salon des juges.`,[questionReplyButton(row.id)]);
+  return i.reply({content:`✅ Question ${ (await db.questions(stageId)).filter(x=>x.judge_id===i.user.id).length }/3 enregistrée pour la candidate n°${candidate.number}. ${ok?'Elle a reçu un MP.':'⚠️ Son MP est fermé : Tropi pourra la relancer.'}`,flags:E});
+ }
+ if(i.isButton()&&/^rc:qreply:\d+$/.test(i.customId)){
+  const row=await db.question(guild,Number(i.customId.split(':')[2]));
+  const stage= row && await db.stage(guild,row.stage_id);
+  if(!row||!['collect','published'].includes(row.status)||stage?.questions_posted||row.candidate_id!==i.user.id)return i.reply({content:'Cette question est fermée ou ne t’est pas adressée.',flags:E});
+  const modal=new ModalBuilder().setCustomId(`rc:qanswer:${row.id}`).setTitle('Ta réponse — candidate n°'+row.candidate_number).addComponents(
+   textField('reponse','Ta réponse (1800 caractères max)',TextInputStyle.Paragraph,1800));
+  if(row.answer)modal.components[0].components[0].setValue(row.answer.slice(0,1800));
+  await i.showModal(modal);return true;
+ }
+ if(i.isModalSubmit()&&/^rc:qanswer:\d+$/.test(i.customId)){
+  const id=Number(i.customId.split(':')[2]),answer=i.fields.getTextInputValue('reponse').trim();
+  if(!answer)return i.reply({content:'Ta réponse est vide.',flags:E});
+  await db.saveQuestionAnswer(guild,id,i.user.id,answer);
+  const row=await db.question(guild,id);
+  const header=`💌 **Réponse à ta question — candidate n°${row.candidate_number}**\n**Question :** ${row.question}`;
+  const ok=(await dm(row.judge_id,header)) && (await dm(row.judge_id,`**Réponse :**\n${answer}`));
+  return i.reply({content:`✅ Réponse enregistrée ! ${ok?'Le juge concerné vient de la recevoir en MP.':'La réponse est conservée ; le juge pourra la consulter lors de la publication.'}`,flags:E});
+ }
  return false;
 }
+async function handleExtra(i){
+ if(i.guildId!==guild)return i.reply({content:'Cette commande est réservée au serveur LDH.',flags:E});
+ if(!await admin(i))return i.reply({content:'🔒 Esty et Tropi uniquement. Les juges utilisent leurs boutons en MP.',flags:E});
+ const sub=i.options.getSubcommand();
+ await i.deferReply({flags:E});
+ if(sub==='infiltre-ajouter'){
+  const u=i.options.getUser('membre');if(u.bot)return privateReply(i,'Un compte bot ne peut pas être infiltré.');
+  await db.addInfiltrator(guild,u.id);await judgeRole(u.id,true);
+  return privateReply(i,`🕵️ <@${u.id}> participe désormais **en candidate et au jury**. Il ne pourra ni se questionner ni se noter lui-même. Les autres membres ne sont pas avertis.`);
+ }
+ if(sub==='infiltre-retirer'){
+  const u=i.options.getUser('membre'),ret=await db.removeInfiltrator(guild,u.id);
+  if(ret)await judgeRole(u.id,false);
+  return privateReply(i,ret?'✅ Double rôle retiré ; la candidature reste inscrite.':'Cette personne n’avait pas le double rôle.');
+ }
+ if(sub==='presentation-preparer'){
+  const stage=await db.createStage(guild,PRESENTATION_TITLE,PRESENTATION_PROMPT,'text');
+  return privateReply(i,`✅ **Première épreuve préparée :** ${stage.title} (brouillon #${stage.id}).\nLance-la avec \`/reine epreuve-lancer\`. Aucun inscrit n’a été effacé.`);
+ }
+ if(sub==='classement-precedent'){
+  const previous=await db.lastTextStage(guild);if(!previous)return privateReply(i,'Aucune épreuve précédente notée et clôturée.');
+  return privateReply(i,`🏆 **Classement secret — ${previous.title}**\n${rankText(await db.ranking(guild,previous.id),true)}`);
+ }
+ if(sub==='questions-preparer'){
+  const stage=await db.createStage(guild,'💌 Derrière les apparences — 3 questions par juge','Chaque juge dispose de trois questions au total, à adresser aux candidates de son choix. Les réponses sont privées, publiées sans pseudonyme, puis notées sur 10 par le jury.','questions');
+  return privateReply(i,`✅ **Manche des questions préparée** (#${stage.id}). Démarre avec \`/coeur questions-lancer\`.`);
+ }
+ const st=await db.latest(guild);
+ if(!st||st.kind!=='questions')return privateReply(i,'Prépare d’abord la manche des questions avec `/coeur questions-preparer`.');
+ if(sub==='questions-lancer'){
+  if(st.status!=='draft')return privateReply(i,'La phase des questions a déjà démarré.');
+  await db.setStageStatus(guild,st.id,'draft','collect');
+  const judges=await db.members(guild,'judge',true);let ok=0;
+  for(const j of judges)if(await dm(j.user_id,`👑 **La Reine des Cœurs — 3 questions par juge**\nTu peux adresser jusqu’à **trois questions au total** aux candidates de ton choix, en indiquant leur numéro anonyme. Clique à nouveau sur le bouton pour chaque question. Impossible de te questionner toi-même si tu es infiltré.`,[askButton(st.id)]))ok++;
+  return privateReply(i,`✅ Questions ouvertes. ${ok}/${judges.length} MP envoyés aux juges.`);
+ }
+ if(sub==='questions-statut'){
+  const qs=await db.questions(st.id),judges=await db.members(guild,'judge',true),candidates=await db.members(guild,'candidate',true);
+  const lines=judges.map(j=>`<@${j.user_id}> : ${qs.filter(q=>q.judge_id===j.user_id).length}/3 question(s)`);
+  const candidatesLines=candidates.map(c=>{const his=qs.filter(q=>q.candidate_id===c.user_id);return `N°${c.number}: ${his.filter(q=>q.answer!==null).length}/${his.length} réponse(s)`;});
+  return privateReply(i,`💌 **Questions — ${st.status}**\n${qs.length} envoyées, ${qs.filter(q=>q.answer!==null).length} réponses reçues.\n**Juges :**\n${lines.join('\n')||'Aucun'}\n**Candidates :**\n${candidatesLines.join('\n')||'Aucune'}`);
+ }
+ if(sub==='questions-rappels'){
+  if(!['collect','published'].includes(st.status)||st.questions_posted)return privateReply(i,'La collecte des questions et des réponses est terminée.');
+  const qs=await db.questions(st.id);let judges=0,candidates=0;
+  if(st.status==='collect')for(const j of await db.members(guild,'judge',true)){
+   const sent=qs.filter(q=>q.judge_id===j.user_id).length;
+   if(sent<3&&await dm(j.user_id,`⏰ Il te reste ${3-sent} question(s) possibles à poser pour La Reine des Cœurs.`,[askButton(st.id)]))judges++;
+  }
+  for(const q of qs)if(q.answer===null&&await dm(q.candidate_id,`🔔 **Rappel : question du jury, candidate n°${q.candidate_number}**\n${q.question}`, [questionReplyButton(q.id)]))candidates++;
+  return privateReply(i,`📨 ${judges} rappel(s) de juges et ${candidates} rappel(s) de réponses envoyés.`);
+ }
+ if(sub==='questions-fermer'){
+  if(st.status!=='collect')return privateReply(i,'La collecte des questions n’est pas ouverte.');
+  await db.setStageStatus(guild,st.id,'collect','published');
+  return privateReply(i,'🔒 Les juges ne peuvent plus poser de nouvelles questions. Les candidates peuvent encore répondre ; utilise `/coeur questions-rappels`.');
+ }
+ if(sub==='questions-publier'){
+  if(st.status!=='published')return privateReply(i,'Ferme d’abord les questions avec `/coeur questions-fermer`.');
+  if(st.questions_posted)return privateReply(i,'Les réponses ont déjà été publiées ; la notation est ouverte.');
+  const qs=await db.questions(st.id),missing=qs.filter(q=>q.answer===null);
+  if(!qs.length)return privateReply(i,'Aucune question à publier.');
+  const cfg=await db.settings(guild);if(!cfg.judge_channel)return privateReply(i,'Configure d’abord le salon des juges.');
+  if(missing.length&&!i.options.getBoolean('forcer'))return privateReply(i,`⏳ ${missing.length} réponse(s) manquante(s). Utilise \`/coeur questions-rappels\` ou \`/coeur questions-publier forcer:true\`.`);
+  await sendJudge(`💌 **LA REINE DES CŒURS — DERRIÈRE LES APPARENCES**\n${qs.length} question(s) posées, ${qs.length-missing.length} réponse(s). Chaque juge peut noter sur **10 chacune des réponses reçues**. Les moyennes par candidate seront calculées sans attribuer de zéro à celles qui n’ont reçu aucune question. Notes confidentielles avant clôture.`);
+  const channelConfig=await db.settings(guild);
+  const channel=await bot.channels.fetch(channelConfig.judge_channel);
+  for(const q of qs){
+   const header=`💌 **Candidate n°${q.candidate_number} — question ${q.id}**\n**Question :** ${q.question}`;
+   await sendJudge(header);
+   if(q.answer){
+    for(const part of (q.answer.match(/[\s\S]{1,1700}/g)||[]))await sendJudge(`**Réponse :**\n${part}`);
+    await channel.send({content:`⭐ **Noter la réponse n°${q.id} de la candidate n°${q.candidate_number}**`,components:[questionGradeButton(q.id)],allowedMentions:{parse:[]}});
+   }else await sendJudge('*Sans réponse : aucune note possible pour cette question.*');
+  }
+  await db.markQuestionsPosted(guild,st.id);
+  return privateReply(i,`✅ ${qs.length} question(s) publiées, ${qs.length-missing.length} réponse(s) ouvertes à la notation sur 10. Suivi : \`/coeur questions-notes-statut\`.`);
+ }
+ if(sub==='questions-notes-statut'){
+  if(!st.questions_posted)return privateReply(i,'Publie d’abord les réponses avec `/coeur questions-publier`.');
+  const qs=(await db.questions(st.id)).filter(q=>q.answer!==null),judges=await db.members(guild,'judge',true),grades=await db.questionGrades(st.id);
+  const expected=expectedQuestionGrades(judges,qs);
+  const lines=expected.map(({judge,questions})=>`<@${judge.user_id}> : ${grades.filter(g=>g.judge_id===judge.user_id).length}/${questions.length} notes${questions.some(q=>q.candidate_id===judge.user_id)?' (sa réponse exclue)':''}`);
+  return privateReply(i,`⭐ **Notes des réponses — ${st.title}** (${st.status})\n${lines.join('\n')||'Aucun juge.'}`);
+ }
+ if(sub==='questions-notes-rappels'){
+  if(st.status!=='published'||!st.questions_posted)return privateReply(i,'Les notes des questions ne sont pas ouvertes.');
+  const qs=(await db.questions(st.id)).filter(q=>q.answer!==null),judges=await db.members(guild,'judge',true),grades=await db.questionGrades(st.id);
+  const cfg=await db.settings(guild);let sent=0;
+  for(const {judge,questions} of expectedQuestionGrades(judges,qs)){
+   const done=grades.filter(g=>g.judge_id===judge.user_id).length,missing=questions.length-done;
+   if(missing>0&&await dm(judge.user_id,`⏰ **La Reine des Cœurs** : il te reste **${missing} réponse(s)** à noter sur 10. Retrouve les boutons de notation dans <#${cfg.judge_channel}>.`))sent++;
+  }
+  return privateReply(i,`📨 ${sent} juge(s) relancé(s) pour terminer la notation des réponses.`);
+ }
+ if(sub==='questions-notes-fermer'){
+  if(st.status!=='published'||!st.questions_posted)return privateReply(i,'Publie d’abord les réponses et ouvre les notes.');
+  const qs=(await db.questions(st.id)).filter(q=>q.answer!==null),judges=await db.members(guild,'judge',true),grades=await db.questionGrades(st.id);
+  const exp=expectedQuestionGrades(judges,qs);
+  const missing=exp.reduce((n,{judge,questions})=>n+questions.filter(q=>!grades.some(g=>g.judge_id===judge.user_id&&Number(g.question_id)===Number(q.id))).length,0);
+  if(!grades.length)return privateReply(i,'Aucune note reçue. Fais noter les réponses avant de clôturer.');
+  if(missing&&!i.options.getBoolean('forcer'))return privateReply(i,`⏳ Il reste ${missing} note(s) manquante(s). Utilise \`/coeur questions-notes-fermer forcer:true\` si tu souhaites clôturer sans attendre.`);
+  await db.setStageStatus(guild,st.id,'published','closed');
+  return privateReply(i,`🔒 Notes de la manche des questions clôturées : ${grades.length} reçues, ${missing} manquante(s). Consulte \`/coeur questions-classement\`, puis choisis librement les éliminations avec \`/reine eliminer\`.`);
+ }
+ if(sub==='questions-classement'||sub==='questions-resultats-publier'){
+  if(st.status!=='closed')return privateReply(i,'Clôture les notes avec `/coeur questions-notes-fermer`.');
+  const rows=await db.questionRanking(guild,st.id),msg=`🏆 **${st.title} — Classement des réponses**\n${questionRankText(rows,sub==='questions-classement')}\n\n*Une candidate sans question ou sans note est « non évaluée », pas notée zéro. Les éliminations restent manuelles.*`;
+  if(sub==='questions-classement')return privateReply(i,msg);
+  await sendJudge(msg);return privateReply(i,'✅ Classement anonyme publié dans le salon des juges.');
+ }
+ if(sub==='questions-secrets'){
+  const qs=await db.questions(st.id),ratings=await db.questionGrades(st.id);await privateReply(i,`🔐 **Archives secrètes — ${st.title}** (${qs.length} questions)\nAuteurs, candidates, réponses et notes individuelles :`);
+  for(const q of qs){
+   const rated=ratings.filter(g=>Number(g.question_id)===Number(q.id));
+   const msg=`**Question ${q.id}** de <@${q.judge_id}> à <@${q.candidate_id}> (n°${q.candidate_number})\n**Q :** ${q.question}\n**R :** ${q.answer||'En attente'}\n**Notes :** ${rated.map(g=>`<@${g.judge_id}> ${g.grade}/10${g.comment?` (« ${g.comment} »)`:''}`).join(', ')||'Aucune'}`;
+   for(const part of (msg.match(/[\s\S]{1,1850}/g)||[]))await i.followUp({content:part,flags:E});
+  }
+  return true;
+ }
+ return privateReply(i,'Commande inconnue.');
+}
 async function init(client,guildId,ownerId){bot=client;guild=guildId;owner=ownerId;await db.init();await db.settings(guild);}
-module.exports={command,init,handle};
+module.exports={command,extraCommand,init,handle};

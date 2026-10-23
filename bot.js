@@ -272,8 +272,8 @@ client.once(Events.ClientReady,async ready=>{
   console.log(`✅ Esty Events connecté : ${ready.user.tag}`);
   try {
     const rest = new REST({version:'10'}).setToken(process.env.DISCORD_TOKEN);
-    await rest.put(Routes.applicationGuildCommands(ready.user.id,guildId),{body:[...commands,reine.command,roue.command].map(c=>c.toJSON())});
-    console.log('✅ Commandes /probleme, /animation, /reine et /roue synchronisées sur LDH.');
+    await rest.put(Routes.applicationGuildCommands(ready.user.id,guildId),{body:[...commands,reine.command,reine.extraCommand,roue.command].map(c=>c.toJSON())});
+    console.log('✅ Commandes /probleme, /animation, /reine, /coeur et /roue synchronisées sur LDH.');
   } catch(e) { console.error('❌ Enregistrement des commandes :',e); }
 });
 (async()=>{
