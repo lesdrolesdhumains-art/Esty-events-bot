@@ -60,6 +60,14 @@ await q(`CREATE TABLE IF NOT EXISTS rc_question_grades (
  PRIMARY KEY(question_id,judge_id)
 );
 CREATE INDEX IF NOT EXISTS rc_qgrades_by_judge ON rc_question_grades(judge_id);`);
+// Conserve les numéros de chaque manche dans les archives, même après un remélange.
+await q(`CREATE TABLE IF NOT EXISTS rc_stage_numbers (
+ stage_id BIGINT NOT NULL REFERENCES rc_stages(id) ON DELETE CASCADE,
+ candidate_id TEXT NOT NULL,
+ number INT NOT NULL,
+ PRIMARY KEY(stage_id,candidate_id),
+ UNIQUE(stage_id,number)
+);`);
 }
 async function settings(guild){await q('INSERT INTO rc_settings(guild_id) VALUES($1) ON CONFLICT DO NOTHING',[guild]);return one('SELECT * FROM rc_settings WHERE guild_id=$1',[guild]);}
 async function setSetting(guild,key,val){if(!['judge_channel','judge_role','winner_role','registrations_closed'].includes(key))throw Error('Configuration refusée');await settings(guild);return one(`UPDATE rc_settings SET ${key}=$2 WHERE guild_id=$1 RETURNING *`,[guild,val]);}
@@ -98,29 +106,80 @@ async function closeRegistrations(guild){const c=await pool.connect();try{await 
 async function latest(guild){return one('SELECT * FROM rc_stages WHERE guild_id=$1 ORDER BY id DESC LIMIT 1',[guild]);}
 async function lastTextStage(guild){return one("SELECT * FROM rc_stages WHERE guild_id=$1 AND kind='text' AND status='closed' ORDER BY id DESC LIMIT 1",[guild]);}
 async function stage(guild,id){return one('SELECT * FROM rc_stages WHERE guild_id=$1 AND id=$2',[guild,id]);}
-async function createStage(guild,title,prompt,kind='text'){const s=await settings(guild);if(!s.registrations_closed)throw Error('Ferme d’abord les inscriptions.');const last=await latest(guild);if(last&&last.status!=='closed')throw Error('Clôture d’abord la précédente épreuve.');const remaining=await members(guild,'candidate',true);if(remaining.length<2)throw Error('Pas assez de candidates encore en jeu.');return one('INSERT INTO rc_stages(guild_id,title,prompt,kind) VALUES($1,$2,$3,$4) RETURNING *',[guild,title,prompt,kind]);}
+async function createStage(guild,title,prompt,kind='text'){
+ const s=await settings(guild);if(!s.registrations_closed)throw Error('Ferme d’abord les inscriptions.');
+ const last=await latest(guild);if(last&&last.status!=='closed')throw Error('Clôture d’abord la précédente épreuve.');
+ const remaining=await members(guild,'candidate',true);if(remaining.length<2)throw Error('Pas assez de candidates encore en jeu.');
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const row=(await c.query('INSERT INTO rc_stages(guild_id,title,prompt,kind) VALUES($1,$2,$3,$4) RETURNING *',[guild,title,prompt,kind])).rows[0];
+  await c.query(`INSERT INTO rc_stage_numbers(stage_id,candidate_id,number)
+   SELECT $1,user_id,number FROM rc_members WHERE guild_id=$2 AND kind='candidate' AND number IS NOT NULL`,[row.id,guild]);
+  await c.query('COMMIT');return row;
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+// Renumérotation de la liste active uniquement, avec historique intact.
+// Chaque personne reçoit un numéro différent (dérangement complet).
+async function melangerNumeros(guild){
+ const {randomInt}=require('node:crypto');
+ const c=await pool.connect();
+ try{
+  await c.query('BEGIN');
+  const cfg=(await c.query('SELECT registrations_closed FROM rc_settings WHERE guild_id=$1 FOR UPDATE',[guild])).rows[0];
+  if(!cfg?.registrations_closed)throw Error('Clôture d’abord les inscriptions.');
+  const st=(await c.query('SELECT id,status FROM rc_stages WHERE guild_id=$1 ORDER BY id DESC LIMIT 1 FOR UPDATE',[guild])).rows[0];
+  if(!st||st.status!=='closed')throw Error('La manche actuelle doit être terminée et les notes clôturées avant de remélanger.');
+  const active=(await c.query(`SELECT user_id,number FROM rc_members
+   WHERE guild_id=$1 AND kind='candidate' AND active=TRUE ORDER BY number FOR UPDATE`,[guild])).rows;
+  if(active.length<2)throw Error('Il faut au moins deux candidates actives pour remélanger les numéros.');
+  if(active.some(row=>row.number===null))throw Error('Une candidate active ne possède pas de numéro.');
+  // Reconstituer le mapping historique de toutes les manches, UNE SEULE FOIS par manche.
+  await c.query(`INSERT INTO rc_stage_numbers(stage_id,candidate_id,number)
+   SELECT s.id,m.user_id,m.number FROM rc_stages s
+   JOIN rc_members m ON m.guild_id=s.guild_id AND m.kind='candidate' AND m.number IS NOT NULL
+   WHERE s.guild_id=$1 ON CONFLICT(stage_id,candidate_id) DO NOTHING`,[guild]);
+  const original=active.map(row=>Number(row.number));
+  let newNumbers;
+  for(let attempt=0;attempt<100;attempt++){
+   const bag=[...original];
+   for(let k=bag.length-1;k>0;k--){const j=randomInt(k+1);[bag[k],bag[j]]=[bag[j],bag[k]];}
+   if(bag.every((value,index)=>value!==original[index])){newNumbers=bag;break;}
+  }
+  if(!newNumbers){const delta=randomInt(1,original.length);newNumbers=original.map((_,index)=>original[(index+delta)%original.length]);}
+  // Libérer les numéros actifs puis attribuer les nouveaux, sans toucher aux éliminées.
+  await c.query("UPDATE rc_members SET number=NULL WHERE guild_id=$1 AND kind='candidate' AND active=TRUE",[guild]);
+  for(let k=0;k<active.length;k++)await c.query('UPDATE rc_members SET number=$3 WHERE guild_id=$1 AND user_id=$2',[guild,active[k].user_id,newNumbers[k]]);
+  await c.query('COMMIT');
+  return active.map((entry,k)=>({user_id:entry.user_id,oldNumber:Number(entry.number),newNumber:newNumbers[k]}));
+ }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}
+async function stageNumberMap(stageId){return new Map((await q('SELECT candidate_id,number FROM rc_stage_numbers WHERE stage_id=$1',[stageId])).rows.map(r=>[r.candidate_id,r.number]));}
+
 async function setStageStatus(guild,id,from,to){return one('UPDATE rc_stages SET status=$4 WHERE guild_id=$1 AND id=$2 AND status=$3 RETURNING *',[guild,id,from,to]);}
-async function submissions(id){return (await q('SELECT s.*,m.number,m.active FROM rc_submissions s JOIN rc_members m ON m.user_id=s.candidate_id JOIN rc_stages t ON t.id=s.stage_id AND t.guild_id=m.guild_id WHERE s.stage_id=$1 ORDER BY m.number',[id])).rows;}
+async function submissions(id){return (await q('SELECT s.*,COALESCE(sn.number,m.number) AS number,m.active FROM rc_submissions s JOIN rc_members m ON m.user_id=s.candidate_id JOIN rc_stages t ON t.id=s.stage_id AND t.guild_id=m.guild_id LEFT JOIN rc_stage_numbers sn ON sn.stage_id=s.stage_id AND sn.candidate_id=s.candidate_id WHERE s.stage_id=$1 ORDER BY COALESCE(sn.number,m.number)',[id])).rows;}
 async function saveSubmission(guild,id,candidate,answer){const st=await stage(guild,id);if(!st||st.status!=='collect')throw Error('Réception des textes fermée.');const m=await member(guild,candidate);if(!m||m.kind!=='candidate'||!m.active)throw Error('Candidate non autorisée.');return one('INSERT INTO rc_submissions(stage_id,candidate_id,answer) VALUES($1,$2,$3) ON CONFLICT(stage_id,candidate_id) DO UPDATE SET answer=$3,updated_at=NOW() RETURNING *',[id,candidate,answer]);}
 async function grades(id){return (await q('SELECT * FROM rc_grades WHERE stage_id=$1 ORDER BY judge_id,candidate_id',[id])).rows;}
 async function setGrade(guild,id,judge,candidate,grade,comment){const st=await stage(guild,id);if(!st||st.status!=='published')throw Error('Les notes ne sont pas ouvertes.');const j=await member(guild,judge);if(!j || (j.kind!=='judge' && !await isDualJudge(guild,judge)))throw Error('Accès réservé aux juges inscrits.');if(judge===candidate)throw Error('Tu ne peux jamais noter ton propre texte.');const s=await one('SELECT 1 FROM rc_submissions WHERE stage_id=$1 AND candidate_id=$2',[id,candidate]);if(!s)throw Error('Cette candidate n’a pas rendu de texte.');return one('INSERT INTO rc_grades(stage_id,judge_id,candidate_id,grade,comment) VALUES($1,$2,$3,$4,$5) ON CONFLICT(stage_id,judge_id,candidate_id) DO UPDATE SET grade=$4,comment=$5,updated_at=NOW() RETURNING *',[id,judge,candidate,grade,comment]);}
-async function ranking(guild,id){return (await q(`SELECT m.user_id,m.number,m.active,COUNT(g.grade)::int AS notes,
+async function ranking(guild,id){return (await q(`SELECT m.user_id,COALESCE(sn.number,m.number) AS number,m.active,COUNT(g.grade)::int AS notes,
  ROUND(AVG(g.grade)::numeric,2) AS moyenne,SUM(g.grade)::int AS total
  FROM rc_members m JOIN rc_submissions s ON s.candidate_id=m.user_id AND s.stage_id=$2
  LEFT JOIN rc_grades g ON g.stage_id=s.stage_id AND g.candidate_id=m.user_id
+ LEFT JOIN rc_stage_numbers sn ON sn.stage_id=$2 AND sn.candidate_id=m.user_id
  WHERE m.guild_id=$1 AND m.kind='candidate'
- GROUP BY m.user_id,m.number,m.active ORDER BY moyenne DESC NULLS LAST,m.number`,[guild,id])).rows;}
+ GROUP BY m.user_id,m.number,sn.number,m.active ORDER BY moyenne DESC NULLS LAST,number`,[guild,id])).rows;}
 async function eliminate(guild,id){return one("UPDATE rc_members SET active=FALSE WHERE guild_id=$1 AND number=$2 AND kind='candidate' AND active=TRUE RETURNING *",[guild,id]);}
 async function reset(guild){const c=await pool.connect();try{await c.query('BEGIN');await c.query('DELETE FROM rc_stages WHERE guild_id=$1',[guild]);await c.query('DELETE FROM rc_dual_judges WHERE guild_id=$1',[guild]);await c.query('DELETE FROM rc_members WHERE guild_id=$1',[guild]);await c.query('UPDATE rc_settings SET registrations_closed=FALSE WHERE guild_id=$1',[guild]);await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
 
-async function questions(stageId){return (await q(`SELECT q.*, m.number AS candidate_number, a.answer
+async function questions(stageId){return (await q(`SELECT q.*, COALESCE(sn.number,m.number) AS candidate_number, a.answer
  FROM rc_questions q JOIN rc_stages s ON s.id=q.stage_id
  JOIN rc_members m ON m.guild_id=s.guild_id AND m.user_id=q.candidate_id
+ LEFT JOIN rc_stage_numbers sn ON sn.stage_id=q.stage_id AND sn.candidate_id=q.candidate_id
  LEFT JOIN rc_question_answers a ON a.question_id=q.id WHERE q.stage_id=$1
  ORDER BY q.id`,[stageId])).rows;}
-async function question(guild,id){return one(`SELECT q.*,s.status,s.kind,m.number AS candidate_number,a.answer
+async function question(guild,id){return one(`SELECT q.*,s.status,s.kind,COALESCE(sn.number,m.number) AS candidate_number,a.answer
  FROM rc_questions q JOIN rc_stages s ON s.id=q.stage_id
  JOIN rc_members m ON m.guild_id=s.guild_id AND m.user_id=q.candidate_id
+ LEFT JOIN rc_stage_numbers sn ON sn.stage_id=q.stage_id AND sn.candidate_id=q.candidate_id
  LEFT JOIN rc_question_answers a ON a.question_id=q.id WHERE q.id=$1 AND s.guild_id=$2`,[id,guild]);}
 async function createQuestion(guild,stageId,judgeId,candidateId,body){
  const c=await pool.connect();
@@ -150,10 +209,11 @@ async function saveQuestionAnswer(guild,id,candidateId,answer){
 // Une réponse peut être notée par chaque juge SAUF la candidate elle-même.
 async function markQuestionsPosted(guild,stageId){return one(`UPDATE rc_stages SET questions_posted=TRUE
  WHERE id=$1 AND guild_id=$2 AND kind='questions' AND status='published' AND questions_posted=FALSE RETURNING *`,[stageId,guild]);}
-async function questionGrades(stageId){return (await q(`SELECT g.*,q.stage_id,q.candidate_id,m.number AS candidate_number
+async function questionGrades(stageId){return (await q(`SELECT g.*,q.stage_id,q.candidate_id,COALESCE(sn.number,m.number) AS candidate_number
  FROM rc_question_grades g JOIN rc_questions q ON q.id=g.question_id
  JOIN rc_stages s ON s.id=q.stage_id
  JOIN rc_members m ON m.guild_id=s.guild_id AND m.user_id=q.candidate_id
+ LEFT JOIN rc_stage_numbers sn ON sn.stage_id=q.stage_id AND sn.candidate_id=q.candidate_id
  WHERE q.stage_id=$1 ORDER BY q.id,g.judge_id`,[stageId])).rows;}
 async function gradeQuestion(guild,questionId,judge,grade,comment){
  const c=await pool.connect();try{
@@ -185,11 +245,12 @@ async function questionRanking(guild,stageId){return (await q(`WITH answers AS (
  FROM answers a LEFT JOIN rc_question_grades g ON g.question_id=a.question_id
  GROUP BY a.question_id,a.candidate_id
  )
- SELECT m.user_id,m.number,m.active,COUNT(p.question_id)::int AS questions,
+ SELECT m.user_id,COALESCE(sn.number,m.number) AS number,m.active,COUNT(p.question_id)::int AS questions,
         COALESCE(SUM(p.notes),0)::int AS notes,
         ROUND(AVG(p.moyenne),2) AS moyenne
  FROM rc_members m LEFT JOIN per_question p ON p.candidate_id=m.user_id
+ LEFT JOIN rc_stage_numbers sn ON sn.stage_id=$2 AND sn.candidate_id=m.user_id
  WHERE m.guild_id=$1 AND m.kind='candidate'
- GROUP BY m.user_id,m.number,m.active
- ORDER BY moyenne DESC NULLS LAST,m.number`,[guild,stageId])).rows;}
-module.exports={q,one,init,settings,setSetting,isAdmin,addAdmin,removeAdmin,member,members,isDualJudge,addInfiltrator,removeInfiltrator,addMember,removeMember,closeRegistrations,latest,lastTextStage,stage,createStage,setStageStatus,submissions,saveSubmission,grades,setGrade,ranking,eliminate,reset,questions,question,createQuestion,saveQuestionAnswer,markQuestionsPosted,questionGrades,gradeQuestion,questionRanking};
+ GROUP BY m.user_id,m.number,sn.number,m.active
+ ORDER BY moyenne DESC NULLS LAST,number`,[guild,stageId])).rows;}
+module.exports={q,one,init,settings,setSetting,isAdmin,addAdmin,removeAdmin,member,members,isDualJudge,addInfiltrator,removeInfiltrator,addMember,removeMember,closeRegistrations,latest,lastTextStage,stage,createStage,setStageStatus,submissions,saveSubmission,grades,setGrade,ranking,eliminate,reset,questions,question,createQuestion,saveQuestionAnswer,markQuestionsPosted,questionGrades,gradeQuestion,questionRanking,melangerNumeros,stageNumberMap};

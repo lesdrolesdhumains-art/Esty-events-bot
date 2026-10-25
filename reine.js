@@ -41,6 +41,8 @@ const command=new SlashCommandBuilder().setName('reine').setDescription('👑 La
 // Extensions sans changer les 25 entrées /reine existantes (limite de Discord).
 const extraCommand=new SlashCommandBuilder().setName('coeur').setDescription('👑 Présentation, questions et homme infiltré')
  .addSubcommand(sc=>sc.setName('presentation-preparer').setDescription('Préparer la première épreuve validée'))
+ .addSubcommand(sc=>sc.setName('poeme-preparer').setDescription('Préparer « Lui, mon roi » : poème titré de 10 à 25 vers'))
+ .addSubcommand(sc=>sc.setName('numeros-melanger').setDescription('Remélanger les numéros actifs après élimination et avant la manche suivante').addStringOption(o=>o.setName('confirmation').setDescription('Écrire MELANGER').setRequired(true)))
  .addSubcommand(sc=>sc.setName('infiltre-ajouter').setDescription('Inscrire un homme comme candidat ET juge').addUserOption(o=>o.setName('membre').setDescription('Homme infiltré').setRequired(true)))
  .addSubcommand(sc=>sc.setName('infiltre-retirer').setDescription('Retirer le double rôle (conserve sa candidature)').addUserOption(o=>o.setName('membre').setDescription('Infiltré').setRequired(true)))
  .addSubcommand(sc=>sc.setName('questions-preparer').setDescription('Préparer la manche de 3 questions par juge'))
@@ -61,6 +63,29 @@ function questionRankText(rows,names=false){return rows.map((r,i)=>`${i+1}. **N�
 function expectedQuestionGrades(judges,answered){return judges.map(j=>({judge:j,questions:answered.filter(q=>q.candidate_id!==j.user_id)}));}
 const PRESENTATION_TITLE='👑 Qui se cache derrière la couronne ?';
 const PRESENTATION_PROMPT='Présente-toi anonymement au jury : ta personnalité, tes qualités, tes petits défauts, tes contradictions, ta vision de l’amour et ce qui te rend différente. Sois naturelle, sincère, drôle ou mystérieuse selon ton caractère. Longueur conseillée : 150 à 300 mots. Ne donne pas ton pseudo ni d’indices permettant de deviner ton identité.';
+// Reprise fidèle du défi « Elle, ma reine » de Don Juan, inversé pour les candidates.
+// Kind « poem » évite de confondre le suivi des présentations et celui des poèmes.
+const POEM_TITLE='🌹 Le défi du poète — Lui, mon roi';
+const POEM_PROMPT=`🌹 LE DÉFI DU POÈTE — « Lui, mon roi »
+
+Imagine un homme que tu désires profondément, que tu admires et qui te fascine. Écris un poème original pour le placer sur un piédestal : fais de lui ta muse, ton roi. Célèbre son charme, mais aussi son esprit, sa force, sa sensibilité et sa liberté, sans le réduire à son physique.
+
+RÈGLES : donne un titre à ton poème (champ séparé) ; écris entre 10 et 25 vers (chaque ligne non vide = 1 vers). Poème : 3 900 caractères maximum ; titre : 100 caractères maximum. Le style doit être sensuel, élégant et romantique, sans vulgarité ni description sexuelle explicite. N'utilise aucun pseudo ni indice révélant ton identité.
+
+OBJECTIF : que le jury sente pourquoi cet homme est unique à tes yeux et pourquoi il mériterait d'être ton roi.`;
+function poemVerses(body){return String(body).split(/\r?\n/).filter(line=>line.trim().length>0).length;}
+function poemCheck(title,body){
+ if(!title||title.length>100)return '⛔ Donne un titre à ton poème (100 caractères maximum).';
+ if(!body||body.length>3900)return '⛔ Ton poème doit contenir au maximum 3 900 caractères.';
+ const n=poemVerses(body);
+ if(n<10||n>25)return `⛔ Ton poème compte **${n} vers**. Il doit en comporter **10 à 25** (chaque ligne non vide compte pour un vers). Modifie-le puis renvoie-le.`;
+ return null;
+}
+function decodePoem(saved){
+ const match=String(saved||'').match(/^\*\*(.+?)\*\*\n\n([\s\S]*)$/);
+ return match?{title:match[1],body:match[2]}:{title:'',body:''};
+}
+
 function textField(id,label,style,maxLen,required=true){return new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setMaxLength(maxLen).setRequired(required));}
 function answerButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:answer:${id}`).setLabel('✍️ Envoyer ou modifier mon texte').setStyle(ButtonStyle.Primary));}
 function gradeMenu(stage,subs){return new ActionRowBuilder().addComponents(new StringSelectMenuBuilder()
@@ -99,7 +124,7 @@ function suiviEtat(st){
  if(st.status==='published')return '⭐ notes ouvertes';
  return st.status==='closed'?'🔒 terminée':st.status;
 }
-function suiviNom(p){return `${p.number?`N°${p.number}`:'Sans n°'} — <@${p.user_id}>${p.active?'':' · éliminée'}`;}
+function suiviNom(p,numero=p.number){return `${numero?`N°${numero}`:'Sans n°'} — <@${p.user_id}>${p.active?'':' · éliminée'}`;}
 // Lecture seule. Aucune table créée, aucune inscription ou note modifiée.
 async function afficherSuivi(i){
  const [candidates,judges,allStages]=await Promise.all([
@@ -114,12 +139,12 @@ async function afficherSuivi(i){
   sections.push('💌 **1. PRÉSENTATIONS**\n🕒 Aucune épreuve de présentation créée.\n' +
    (candidates.map(c=>`➖ ${suiviNom(c)}`).join('\n')||'_Aucune candidate inscrite._'));
  }else{
-  const [submissions,ratings]=await Promise.all([db.submissions(presentation.id),db.grades(presentation.id)]);
+  const [submissions,ratings,historicNums]=await Promise.all([db.submissions(presentation.id),db.grades(presentation.id),db.stageNumberMap(presentation.id)]);
   const received=new Set(submissions.map(x=>x.candidate_id));
   const total=candidates.filter(c=>received.has(c.user_id)).length;
   const candidatelist=candidates.map(c=>{
    const done=received.has(c.user_id),icon=done?'✅':presentation.status==='draft'?'➖':['published','closed'].includes(presentation.status)?'❌':'⏳';
-   return `${icon} ${suiviNom(c)} · ${done?'texte reçu':'texte non reçu'}`;
+   return `${icon} ${suiviNom(c,historicNums.get(c.user_id)??c.number)} · ${done?'texte reçu':'texte non reçu'}`;
   }).join('\n')||'_Aucune candidate._';
   sections.push(`💌 **1. PRÉSENTATIONS — ${presentation.title}**\n${suiviEtat(presentation)} · **${total}/${candidates.length}** textes reçus\n${candidatelist}\n${presentation.status==='collect'?'💡 Relances : `/reine rappels`':''}`);
   let bulletins=0,doneNotes=0,expectedNotes=0;
@@ -136,7 +161,7 @@ async function afficherSuivi(i){
  if(!questionsStage){
   sections.push('💌 **2. QUESTIONS / RÉPONSES / VOTES**\n🕒 Manche non créée. Elle apparaîtra ici après `/coeur questions-preparer`.');
  }else{
-  const [questions,grades]=await Promise.all([db.questions(questionsStage.id),db.questionGrades(questionsStage.id)]);
+  const [questions,grades,historicNums]=await Promise.all([db.questions(questionsStage.id),db.questionGrades(questionsStage.id),db.stageNumberMap(questionsStage.id)]);
   const answered=questions.filter(x=>x.answer!==null);
   const published=Boolean(questionsStage.questions_posted);
   const current=questionsStage.status;
@@ -150,7 +175,7 @@ async function afficherSuivi(i){
   const ansLines=candidates.map(c=>{
    const qs=questions.filter(q=>q.candidate_id===c.user_id),done=qs.filter(q=>q.answer!==null).length;
    const icon=!qs.length?'➖':done===qs.length?'✅':published||current==='closed'?'❌':'⏳';
-   return `${icon} ${suiviNom(c)} — **${done}/${qs.length} réponses**${!qs.length?' (aucune question reçue)':''}`;
+   return `${icon} ${suiviNom(c,historicNums.get(c.user_id)??c.number)} — **${done}/${qs.length} réponses**${!qs.length?' (aucune question reçue)':''}`;
   });
   sections.push(`💬 **RÉPONSES DES CANDIDATES**\n**${answered.length}/${questions.length}** réponses rendues\n${ansLines.join('\n')||'_Aucune candidate._'}\n${!published&&questions.length?'💡 Relances : `/coeur questions-rappels`':''}`);
   const notesJudges=judges.map(j=>{
@@ -165,7 +190,25 @@ async function afficherSuivi(i){
    sections.push(`🔎 **DÉTAIL DES QUESTIONS (${questions.length})**\n${questions.map(q=>`${q.answer!==null?'✅':'⏳'} Question ${q.id} · <@${q.judge_id}> → ${q.candidate_number?'N°'+q.candidate_number:'candidate'} <@${q.candidate_id}>`).join('\n')}`);
   }
  }
- sections.push('🔐 **Rappel :** ce suivi affiche les pseudos pour Esty et Tropi uniquement.\nLes notes ne sont pas publiées automatiquement et les éliminations restent manuelles.');
+  const poem=[...stages].reverse().find(s=>s.kind==='poem');
+  if(poem){
+   const [poems,grades,historicNums]=await Promise.all([db.submissions(poem.id),db.grades(poem.id),db.stageNumberMap(poem.id)]);
+   const submitted=new Set(poems.map(p=>p.candidate_id));
+   const who=candidates.filter(c=>c.active||submitted.has(c.user_id)).map(c=>{
+    const has=submitted.has(c.user_id);
+    const mark=has?'✅':poem.status==='draft'?'➖':poem.status==='collect'?'⏳':'❌';
+    return `${mark} ${suiviNom(c,historicNums.get(c.user_id)??c.number)} — ${has?'poème reçu':'en attente du poème'}`;
+   });
+   sections.push(`🌹 **3. LUI, MON ROI — POÈMES**\n${suiviEtat(poem)} · ${poems.length} poème(s) reçu(s)\n${who.join('\n')||'_Aucune candidate._'}`);
+   const judgeLines=judges.map(j=>{
+    const expected=poems.filter(p=>p.candidate_id!==j.user_id);
+    const received=expected.filter(p=>grades.some(g=>g.judge_id===j.user_id&&g.candidate_id===p.candidate_id)).length;
+    const flag=['draft','collect'].includes(poem.status)||!expected.length?'➖':received===expected.length?'✅':poem.status==='closed'?'❌':'⏳';
+    return `${flag} <@${j.user_id}> — ${received}/${expected.length} notes${poems.some(p=>p.candidate_id===j.user_id)?' (sans auto-notation)':''}`;
+   });
+   sections.push(`⭐ **VOTES — LUI, MON ROI**\n${poem.status==='published'? 'Notes ouvertes':suiviEtat(poem)}\n${judgeLines.join('\n')||'_Aucun juge._'}`);
+  }
+  sections.push('🔐 **Rappel :** ce suivi affiche les pseudos pour Esty et Tropi uniquement.\nLes notes ne sont pas publiées automatiquement et les éliminations restent manuelles.');
  return privateSuivi(i,sections);
 }
 
@@ -210,7 +253,7 @@ async function handle(i){
    const cfg=await db.settings(guild),c=await db.members(guild,'candidate'),j=await db.members(guild,'judge');return privateReply(i,`👑 **La Reine des Cœurs**\nCandidates : ${c.filter(x=>x.active).length}/${c.length} actives · Juges : ${j.length}\nInscriptions : ${cfg.registrations_closed?'fermées':'ouvertes'}\nSalon juges : ${cfg.judge_channel?`<#${cfg.judge_channel}>`:'à configurer'}\nDernière épreuve : ${stage?`${stage.title} (${stage.status})`:'aucune'}`);
   }
   if(sub==='suivi')return afficherSuivi(i);
-  if(sub==='aide')return privateReply(i,'👑 **Aide — La Reine des Cœurs**\nSuivi complet des candidates, questions et notes : `/reine suivi`\nPrésentations : `/coeur presentation-preparer`, `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`\nQuestions : `/coeur questions-preparer`, `/coeur questions-lancer`, `/coeur questions-rappels`, `/coeur questions-fermer`, `/coeur questions-publier`, `/coeur questions-notes-rappels`, `/coeur questions-notes-fermer`\nÉliminations : `/reine eliminer` (au choix de Tropi).');
+   if(sub==='aide')return privateReply(i,'👑 **Aide — La Reine des Cœurs**\nSuivi complet : `/reine suivi`\nPrésentations : `/coeur presentation-preparer`, puis `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`\nQuestions : `/coeur questions-preparer`, `/coeur questions-lancer`, `/coeur questions-rappels`, `/coeur questions-fermer`, `/coeur questions-publier`, `/coeur questions-notes-rappels`, `/coeur questions-notes-fermer`\nPoèmes « Lui, mon roi » : `/coeur poeme-preparer`, `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`, `/reine classement`\nÉliminations : `/reine eliminer` (nombre au choix de Tropi).\nRemélange des numéros actifs : `/coeur numeros-melanger confirmation:MELANGER` uniquement entre deux manches.');
   if(sub==='reinitialiser'){
    if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty peut remettre à zéro la compétition.');if(i.options.getString('confirmation')!=='EFFACER REINE')return privateReply(i,'❌ Annulé. Saisis exactement **EFFACER REINE**.');await db.reset(guild);return privateReply(i,'✅ Épreuves, réponses, notes et inscriptions Reine effacées. Configuration et admins conservés. Aucun dossier Problèmes ou Don Juan touché.');
   }
@@ -222,7 +265,7 @@ async function handle(i){
    for(const p of active){
     const first=await dm(p.user_id,`👑 **LA REINE DES CŒURS — ${stage.title}**\n\n${stage.prompt.slice(0,1550)}`);
     const remainder=stage.prompt.slice(1550);
-    if(first&&await dm(p.user_id,`${remainder?remainder+'\n\n':''}Appuie sur le bouton pour envoyer ton texte (3 500 caractères max). Tu peux le modifier tant que Tropi n’a pas publié les réponses.`,[answerButton(stage.id)]))ok++;
+    if(first&&await dm(p.user_id,`${remainder?remainder+'\n\n':''}${stage.kind==='poem'?'Appuie sur le bouton pour envoyer ton poème : titre obligatoire, 10 à 25 vers et 3 900 caractères maximum.':'Appuie sur le bouton pour envoyer ton texte (3 500 caractères max).'} Tu peux le modifier tant que Tropi n’a pas publié les réponses.`,[answerButton(stage.id)]))ok++;
    }
    return privateReply(i,`📩 Épreuve lancée. ${ok}/${active.length} MP envoyés. Les personnes avec MP fermés doivent les ouvrir.`);
   }
@@ -249,7 +292,7 @@ async function handle(i){
    if(sub==='classement')return privateReply(i,content);await sendJudge(content);return privateReply(i,'✅ Classement anonyme publié dans le salon des juges.');
   }
   if(sub==='secrets'){
-   const subs=await db.submissions(stage.id),grades=await db.grades(stage.id);const m=await db.members(guild,'candidate');const nums=new Map(m.map(x=>[x.user_id,x.number]));
+   const subs=await db.submissions(stage.id),grades=await db.grades(stage.id);const nums=new Map(subs.map(x=>[x.candidate_id,x.number]));
    const lines=grades.map(g=>`#${nums.get(g.candidate_id)} • <@${g.judge_id}> : ${g.grade}/10${g.comment?` — « ${trim(g.comment,100)} »`:''}`);
    return privateReply(i,`🔐 **Secrets — ${stage.title}**\n${subs.map(s=>`#${s.number} : <@${s.candidate_id}> — ${trim(s.answer.replace(/\s+/g,' '),130)}`).join('\n')||'Aucun texte.'}\n\n**Notes nominatives :**\n${lines.join('\n')||'Aucune note.'}\n\n*Texte intégral : /reine archives texte ; notes détaillées : /reine archives notes-details.*`);
   }
@@ -276,12 +319,29 @@ async function handle(i){
   const id=Number(i.customId.split(':')[2]),st=await db.stage(guild,id),person=await db.member(guild,i.user.id);
   if(!st||st.status!=='collect'||!person||person.kind!=='candidate'||!person.active)return i.reply({content:'Ce formulaire est fermé ou tu ne participes pas à cette épreuve.',flags:E});
   const old=(await db.submissions(id)).find(x=>x.candidate_id===i.user.id);
-  const modal=new ModalBuilder().setCustomId(`rc:submit:${id}`).setTitle('👑 '+trim(st.title,39)).addComponents(textField('texte','Ton texte (3 500 caractères max)',TextInputStyle.Paragraph,3500));
-  if(old){modal.components[0].components[0].setValue(old.answer.slice(0,3500));}
+  const modal=new ModalBuilder().setCustomId(`rc:submit:${id}`).setTitle('👑 '+trim(st.title,39));
+  if(st.kind==='poem'){
+   modal.addComponents(textField('titre','Titre de ton poème (100 caractères)',TextInputStyle.Short,100),
+                       textField('poeme','Ton poème (10 à 25 vers)',TextInputStyle.Paragraph,3900));
+   if(old){const previous=decodePoem(old.answer);if(previous.title)modal.components[0].components[0].setValue(previous.title.slice(0,100));if(previous.body)modal.components[1].components[0].setValue(previous.body.slice(0,3900));}
+  }else{
+   modal.addComponents(textField('texte','Ton texte (3 500 caractères max)',TextInputStyle.Paragraph,3500));
+   if(old)modal.components[0].components[0].setValue(old.answer.slice(0,3500));
+  }
   await i.showModal(modal);return true;
  }
  if(i.isModalSubmit()&&/^rc:submit:\d+$/.test(i.customId)){
-  const id=Number(i.customId.split(':')[2]);await db.saveSubmission(guild,id,i.user.id,i.fields.getTextInputValue('texte').trim());await i.reply({content:'✅ Ton texte a été enregistré anonymement ! Tu peux encore le modifier avant sa publication.',flags:E});return true;
+  const id=Number(i.customId.split(':')[2]),st=await db.stage(guild,id);
+  if(!st)return i.reply({content:'Cette épreuve n’existe plus.',flags:E});
+  if(st.kind==='poem'){
+   const title=i.fields.getTextInputValue('titre').trim(),body=i.fields.getTextInputValue('poeme').trim();
+   const error=poemCheck(title,body);
+   if(error)return i.reply({content:error,flags:E});
+   await db.saveSubmission(guild,id,i.user.id,`**${title}**\n\n${body}`);
+   return i.reply({content:`✅ Poème **« ${title} »** enregistré anonymement (${poemVerses(body)} vers). Tu peux le modifier jusqu'à sa publication.`,flags:E});
+  }
+  await db.saveSubmission(guild,id,i.user.id,i.fields.getTextInputValue('texte').trim());
+  await i.reply({content:'✅ Ton texte a été enregistré anonymement ! Tu peux encore le modifier avant sa publication.',flags:E});return true;
  }
  if(i.isStringSelectMenu()&&/^rc:choose:\d+$/.test(i.customId)){
   const id=Number(i.customId.split(':')[2]),st=await db.stage(guild,id),j=await db.member(guild,i.user.id);
@@ -372,6 +432,20 @@ async function handleExtra(i){
   if(ret)await judgeRole(u.id,false);
   return privateReply(i,ret?'✅ Double rôle retiré ; la candidature reste inscrite.':'Cette personne n’avait pas le double rôle.');
  }
+  if(sub==='numeros-melanger'){
+   if(i.options.getString('confirmation')!=='MELANGER')return privateReply(i,'❌ Opération annulée : écris exactement **MELANGER**.');
+   const changelog=await db.melangerNumeros(guild);
+   const n=changelog.length;
+   return privateReply(i,`🔀 **NOUVEAU TIRAGE EFFECTUÉ** : ${n} candidates encore en jeu ont toutes reçu un numéro différent. Les éliminées, les questions, les notes et les archives restent intactes.
+⚠️ Les anciens numéros ne sont plus valables pour la prochaine épreuve.
+🔐 Liste confidentielle des NOUVEAUX numéros : \`/reine identites\`.
+Prépare maintenant « Lui, mon roi » avec \`/coeur poeme-preparer\`.
+Ne publie pas cette réponse privée au jury.`);
+  }
+  if(sub==='poeme-preparer'){
+   const st=await db.createStage(guild,POEM_TITLE,POEM_PROMPT,'poem');
+   return privateReply(i,`✅ **Épreuve « Lui, mon roi » prête** (brouillon #${st.id}).\nTitre obligatoire, 10 à 25 vers, texte de 3 900 caractères maximum.\nPour envoyer l'épreuve aux candidates : \`/reine epreuve-lancer\`. Aucun compte, texte, note ou résultat précédent n'a été supprimé.`);
+  }
  if(sub==='presentation-preparer'){
   const stage=await db.createStage(guild,PRESENTATION_TITLE,PRESENTATION_PROMPT,'text');
   return privateReply(i,`✅ **Première épreuve préparée :** ${stage.title} (brouillon #${stage.id}).\nLance-la avec \`/reine epreuve-lancer\`. Aucun inscrit n’a été effacé.`);
