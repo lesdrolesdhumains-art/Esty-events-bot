@@ -6,6 +6,7 @@
 const {SlashCommandBuilder,ChannelType,ActionRowBuilder,ButtonBuilder,ButtonStyle,
  StringSelectMenuBuilder,ModalBuilder,TextInputBuilder,TextInputStyle,MessageFlags}=require('discord.js');
 const db=require('./reine-db');
+const finaleModule=require('./reine-finale');
 const E=MessageFlags.Ephemeral;
 let bot,guild,owner;
 const command=new SlashCommandBuilder().setName('reine').setDescription('👑 La Reine des Cœurs — candidates et jury masculin')
@@ -55,7 +56,16 @@ const extraCommand=new SlashCommandBuilder().setName('coeur').setDescription('�
  .addSubcommand(sc=>sc.setName('questions-classement').setDescription('Moyenne /10 par candidate pour les réponses aux questions'))
  .addSubcommand(sc=>sc.setName('questions-resultats-publier').setDescription('Publier le classement anonyme de la manche des questions'))
  .addSubcommand(sc=>sc.setName('questions-secrets').setDescription('Voir toutes les questions/réponses et leurs identités en privé'))
- .addSubcommand(sc=>sc.setName('classement-precedent').setDescription('Retrouver le classement de la dernière épreuve notée'));
+ .addSubcommand(sc=>sc.setName('classement-precedent').setDescription('Retrouver le classement de la dernière épreuve notée'))
+ .addSubcommand(sc=>sc.setName('finale-preparer').setDescription('Créer la finale des 3 actes avec 2 finalistes'))
+ .addSubcommand(sc=>sc.setName('finale-lancer').setDescription('Envoyer les 3 sujets à chacune des deux finalistes'))
+ .addSubcommand(sc=>sc.setName('finale-rappels').setDescription('Relancer les textes manquants des 3 actes'))
+ .addSubcommand(sc=>sc.setName('finale-publier').setDescription('Publier les 3 actes et ouvrir les 6 notes').addBooleanOption(o=>o.setName('forcer').setDescription('Publier même si des textes manquent')))
+ .addSubcommand(sc=>sc.setName('finale-suivi').setDescription('Voir les réponses et notes de la finale ✅ ⏳'))
+ .addSubcommand(sc=>sc.setName('finale-notes-rappels').setDescription('Relancer les juges sans bulletin complet'))
+ .addSubcommand(sc=>sc.setName('finale-notes-fermer').setDescription('Clôturer les 6 notes par juge').addBooleanOption(o=>o.setName('forcer').setDescription('Exclure les bulletins incomplets')))
+ .addSubcommand(sc=>sc.setName('finale-classement').setDescription('Classement privé /30 des 2 finalistes'))
+ .addSubcommand(sc=>sc.setName('finale-verdict').setDescription('Désigner la gagnante en privé avant le couronnement').addIntegerOption(o=>o.setName('numero').setDescription('Numéro FINAL 1 ou 2').setRequired(true).setMinValue(1).setMaxValue(2)).addStringOption(o=>o.setName('confirmation').setDescription('Écrire VALIDER').setRequired(true)));
 function askButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:qask:${id}`).setLabel('💌 Poser une question (3 maximum)').setStyle(ButtonStyle.Primary));}
 function questionReplyButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:qreply:${id}`).setLabel('✍️ Répondre à cette question').setStyle(ButtonStyle.Primary));}
 function questionGradeButton(id){return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`rc:qrate:${id}`).setLabel('⭐ Noter cette réponse /10').setStyle(ButtonStyle.Primary));}
@@ -208,7 +218,12 @@ async function afficherSuivi(i){
    });
    sections.push(`⭐ **VOTES — LUI, MON ROI**\n${poem.status==='published'? 'Notes ouvertes':suiviEtat(poem)}\n${judgeLines.join('\n')||'_Aucun juge._'}`);
   }
-  sections.push('🔐 **Rappel :** ce suivi affiche les pseudos pour Esty et Tropi uniquement.\nLes notes ne sont pas publiées automatiquement et les éliminations restent manuelles.');
+  const fin=stages.findLast(x=>x.kind==='finale');
+  if(fin){
+   const stats=await finaleModule.fullStats(fin.id);
+   sections.push(finaleModule.statusText(stats));
+  }
+  sections.push('🔐 **Rappel :** ce suivi affiche les pseudos pour Esty et Tropi uniquement.\nLes notes ne sont pas publiées automatiquement.');
  return privateSuivi(i,sections);
 }
 
@@ -253,12 +268,13 @@ async function handle(i){
    const cfg=await db.settings(guild),c=await db.members(guild,'candidate'),j=await db.members(guild,'judge');return privateReply(i,`👑 **La Reine des Cœurs**\nCandidates : ${c.filter(x=>x.active).length}/${c.length} actives · Juges : ${j.length}\nInscriptions : ${cfg.registrations_closed?'fermées':'ouvertes'}\nSalon juges : ${cfg.judge_channel?`<#${cfg.judge_channel}>`:'à configurer'}\nDernière épreuve : ${stage?`${stage.title} (${stage.status})`:'aucune'}`);
   }
   if(sub==='suivi')return afficherSuivi(i);
-   if(sub==='aide')return privateReply(i,'👑 **Aide — La Reine des Cœurs**\nSuivi complet : `/reine suivi`\nPrésentations : `/coeur presentation-preparer`, puis `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`\nQuestions : `/coeur questions-preparer`, `/coeur questions-lancer`, `/coeur questions-rappels`, `/coeur questions-fermer`, `/coeur questions-publier`, `/coeur questions-notes-rappels`, `/coeur questions-notes-fermer`\nPoèmes « Lui, mon roi » : `/coeur poeme-preparer`, `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`, `/reine classement`\nÉliminations : `/reine eliminer` (nombre au choix de Tropi).\nRemélange des numéros actifs : `/coeur numeros-melanger confirmation:MELANGER` uniquement entre deux manches.');
+   if(sub==='aide')return privateReply(i,'👑 **Aide — La Reine des Cœurs**\nSuivi complet : `/reine suivi`\nPrésentations : `/coeur presentation-preparer`, puis `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`\nQuestions : `/coeur questions-preparer`, `/coeur questions-lancer`, `/coeur questions-rappels`, `/coeur questions-fermer`, `/coeur questions-publier`, `/coeur questions-notes-rappels`, `/coeur questions-notes-fermer`\nPoèmes « Lui, mon roi » : `/coeur poeme-preparer`, `/reine epreuve-lancer`, `/reine rappels`, `/reine epreuve-publier`, `/reine notes-fermer`, `/reine classement`\nFinale (3 actes) : `/coeur finale-preparer`, `/coeur finale-lancer`, `/coeur finale-rappels`, `/coeur finale-publier`, `/coeur finale-suivi`, `/coeur finale-notes-fermer`, `/coeur finale-classement`, `/coeur finale-verdict`, puis `/reine finale`\nÉliminations : `/reine eliminer` (nombre au choix de Tropi).\nRemélange des numéros actifs : `/coeur numeros-melanger confirmation:MELANGER` uniquement entre deux manches.');
   if(sub==='reinitialiser'){
    if(i.user.id!==owner)return privateReply(i,'🔒 Seule Esty peut remettre à zéro la compétition.');if(i.options.getString('confirmation')!=='EFFACER REINE')return privateReply(i,'❌ Annulé. Saisis exactement **EFFACER REINE**.');await db.reset(guild);return privateReply(i,'✅ Épreuves, réponses, notes et inscriptions Reine effacées. Configuration et admins conservés. Aucun dossier Problèmes ou Don Juan touché.');
   }
   if(!stage&&['epreuve-lancer','rappels','epreuve-publier','notes-fermer','classement','resultats-publier','secrets','eliminer','finale'].includes(sub) && !['finale','eliminer'].includes(sub))return privateReply(i,'Crée d’abord une épreuve avec `/reine epreuve-creer`.');
   if(stage?.kind==='questions' && ['epreuve-lancer','rappels','epreuve-publier','notes-fermer','classement','resultats-publier','secrets','texte','notes-details'].includes(sub))return privateReply(i,'Cette manche est celle des questions : utilise les commandes `/coeur questions-...`.');
+  if(stage?.kind==='finale' && ['epreuve-lancer','rappels','epreuve-publier','notes-fermer','classement','resultats-publier','secrets','texte','notes-details','eliminer'].includes(sub))return privateReply(i,'La grande finale possède ses 3 actes et ses propres commandes `/coeur finale-...`. Le verdict se fait avec `/coeur finale-verdict` puis `/reine finale`.');
   if(sub==='epreuve-lancer'){
    if(stage.status!=='draft')return privateReply(i,'Cette épreuve a déjà été lancée.');const active=await db.members(guild,'candidate',true);if(!active.length)throw Error('Aucune candidate.');
    await db.setStageStatus(guild,stage.id,'draft','collect');let ok=0;
@@ -310,10 +326,13 @@ async function handle(i){
   if(sub==='finale'){
    const active=await db.members(guild,'candidate',true);if(active.length!==1)return privateReply(i,`Il faut exactement une candidate encore active (actuellement ${active.length}).`);if(!stage||stage.status!=='closed')return privateReply(i,'Clôture la dernière épreuve avant de couronner la gagnante.');
    const winner=active[0],cfg=await db.settings(guild);if(cfg.winner_role){try{const g=await bot.guilds.fetch(guild),member=await g.members.fetch(winner.user_id);await member.roles.add(cfg.winner_role);}catch(e){console.warn('Rôle gagnante non attribué',e.message);}}
-   await sendAnimation(`👑❤️ **LA REINE DES CŒURS EST COURONNÉE !**\nFélicitations à <@${winner.user_id}> — candidate n°${winner.number} ! 🥂`);return privateReply(i,'👑 Gagnante annoncée ! Vérifie son rôle Discord si un rôle était configuré.');
+   const number=stage.kind==='finale'?(await finaleModule.fullStats(stage.id)).players.find(p=>p.candidate_id===winner.user_id)?.final_number:winner.number;
+   await sendAnimation(`👑❤️ **LA REINE DES CŒURS EST COURONNÉE !**\nFélicitations à <@${winner.user_id}> — finaliste n°${number} ! 🥂`);return privateReply(i,'👑 Gagnante annoncée ! Vérifie son rôle Discord si un rôle était configuré.');
   }
   return privateReply(i,'Commande non reconnue.');
  }
+ // Boutons / formulaires des 3 actes finaux (en MP et dans le salon privé).
+ if((i.isButton()||i.isModalSubmit())&&i.customId?.startsWith('rc:final:'))return finaleModule.handleComponent(i);
  // Interactions de candidatures et de notes : acceptées aussi en MP (sans guildId).
  if(i.isButton()&&/^rc:answer:\d+$/.test(i.customId)){
   const id=Number(i.customId.split(':')[2]),st=await db.stage(guild,id),person=await db.member(guild,i.user.id);
@@ -422,6 +441,7 @@ async function handleExtra(i){
  if(!await admin(i))return i.reply({content:'🔒 Esty et Tropi uniquement. Les juges utilisent leurs boutons en MP.',flags:E});
  const sub=i.options.getSubcommand();
  await i.deferReply({flags:E});
+ if(sub.startsWith('finale-'))return finaleModule.handleCommand(i,sub);
  if(sub==='infiltre-ajouter'){
   const u=i.options.getUser('membre');if(u.bot)return privateReply(i,'Un compte bot ne peut pas être infiltré.');
   await db.addInfiltrator(guild,u.id);await judgeRole(u.id,true);
@@ -540,5 +560,5 @@ Ne publie pas cette réponse privée au jury.`);
  }
  return privateReply(i,'Commande inconnue.');
 }
-async function init(client,guildId,ownerId){bot=client;guild=guildId;owner=ownerId;await db.init();await db.settings(guild);}
+async function init(client,guildId,ownerId){bot=client;guild=guildId;owner=ownerId;await db.init();await db.settings(guild);await finaleModule.init(client,guildId);}
 module.exports={command,extraCommand,init,handle};
