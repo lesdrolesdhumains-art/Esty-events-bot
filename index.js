@@ -14,8 +14,9 @@ module.exports={
   outro:'💗 Fin des Problèmes d’Esty ! Les dossiers non tirés restent sauvegardés.',
   steps:[] // Pas de manches QCM, ni de vérités ou de gages dans ce jeu.
 };
-// Démarrage de secours ecloudserv : index.js OU bot.js. Évite un double lancement.
-if(require.main===module){
+// Démarrage de secours ecloudserv, y compris quand la commande verrouillée utilise ts-node --esm.
+// module.parent est défini quand bot.js importe index.js : pas de deuxième démarrage.
+if (!module.parent) {
   console.log('🚀 Lancement des Problèmes d’Esty depuis index.js...');
   require('./bot.js');
 }

@@ -86,3 +86,16 @@ Elles restent disponibles pour préserver les fonctionnalités indépendantes de
 - **Anciens panneaux bloqués** : `/roue installer` met à jour les panneaux récents ; pour un très ancien message, supprime-le manuellement et réinstalle.
 
 Les fichiers passent les contrôles de syntaxe et le GIF a été décodé avec succès. Un test simulé a vérifié le parcours « bouton → animation → problème », mais **aucune connexion réelle à Discord, ecloudserv ou Neon n'a été testée**.
+
+
+## CORRECTIF DÉMARRAGE ECLOUDSERV / PTERODACTYL (28/10/2026)
+Si la commande hébergeur contient `[[ "${MAIN_FILE}" == "*.js" ]]`, les guillemets empêchent
+le test de suffixe et le conteneur lance `ts-node --esm` au lieu de `node`.
+Dans ce cas, `require.main === module` vaut faux même pour un index.js lancé directement.
+Le nouveau index.js utilise `if (!module.parent)` et démarre donc bot.js aussi avec ce lanceur.
+
+Ne change pas ton token ni DATABASE_URL. Vérifie MAIN_FILE=index.js, mets à jour index.js sur GitHub,
+redéploie la branche et contrôle que le NOUVEAU index.js se trouve aussi dans /home/container.
+Redémarre. Dans les logs, vérifie le lancement des Problèmes d’Esty et la synchronisation
+/roue, /probleme, /animation, sans /reine ni /coeur.
+Un avertissement `[DEP0180]` peut subsister : il provient de ts-node et n'est pas fatal à lui seul.
