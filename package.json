@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "description": "Bot d'animations semi-automatique pour Les Droles d'Humains",
-  "main": "bot.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node bot.js",
-    "check": "node --check bot.js && node --check db.js && node --check commands.js && node --check index.js && node --check reine.js && node --check reine-db.js && node --check roue.js"
+    "start": "node index.js",
+    "check": "node --check index.js && node --check bot.js && node --check roue.js && node --check wheel-db.js && node --check db.js && node --check commands.js"
   },
-  "engines": { "node": ">=20.11.0" },
+  "engines": {
+    "node": ">=20.11.0"
+  },
   "dependencies": {
     "discord.js": "^14.19.3",
     "dotenv": "^16.6.1",

@@ -60,8 +60,8 @@ async function addProblem(guild, question, target, sender) {
 async function problemById(guild, id) {
   return one('SELECT * FROM problems WHERE guild_id=$1 AND id=$2', [guild, id]);
 }
-async function listProblems(guild) {
-  const { rows } = await pool.query('SELECT * FROM problems WHERE guild_id=$1 ORDER BY id DESC LIMIT 25', [guild]);
+async function listProblems(guild, page=1) {
+  const { rows } = await pool.query('SELECT * FROM problems WHERE guild_id=$1 ORDER BY id DESC LIMIT 15 OFFSET $2', [guild, (page-1)*15]);
   const count = await one('SELECT count(*)::int AS n FROM problems WHERE guild_id=$1', [guild]);
   return { rows, total: count.n };
 }
@@ -98,6 +98,11 @@ async function revealProblem(guild, id) {
 }
 async function returnProblem(guild) {
   return one("UPDATE problems SET state='pending' WHERE guild_id=$1 AND state='selected' RETURNING *", [guild]);
+}
+async function restartProblemDraws(guild) {
+  // Réutilise tous les dossiers : ne supprime aucun texte.
+  const {rowCount}=await pool.query("UPDATE problems SET state='pending',revealed_at=NULL WHERE guild_id=$1 AND state <> 'pending'",[guild]);
+  return rowCount;
 }
 async function getSession(guild) {
   return (await one('SELECT * FROM sessions WHERE guild_id=$1', [guild])) || { guild_id: guild, status: 'idle', next_step: 0 };
@@ -159,5 +164,5 @@ async function closePoll(guild) {
 }
 
 module.exports = { pool, initDb, addProblem, problemById, listProblems, updateProblem, deleteProblem,
-  getSelectedProblem, drawProblem, revealProblem, returnProblem, getSession, startSession, setSessionStatus,
+  getSelectedProblem, drawProblem, revealProblem, returnProblem, restartProblemDraws, getSession, startSession, setSessionStatus,
   advanceSession, openPoll, attachPollMessage, getOpenPoll, vote, closePoll };

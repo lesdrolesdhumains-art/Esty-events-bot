@@ -1,12 +1,12 @@
 'use strict';
 /**
- * 🎡 La Roue des Problèmes d'Esty — Les Drôles d'Humains
- * Module autonome, sans dépendance supplémentaire.
- * Commandes : /roue installer, /roue acces, /roue fermer
- * Le bot existant ajoute « roue.command » à l'enregistrement Discord
- * et appelle « await roue.handle(i, {guildId, ownerId, client}) ».
+ * Les Problèmes d’Esty : UN bouton, UN tirage aléatoire de dossier PostgreSQL.
+ * Les anciennes vérités et gages ne sont pas chargés ni utilisés.
+ * Compatibilité : le panneau « estywheel:spin » de l'ancienne roue reste cliquable.
  */
 const crypto = require('node:crypto');
+const db = require('./db');
+const store = require('./wheel-db');
 const {
   SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   MessageFlags, AttachmentBuilder
@@ -14,36 +14,28 @@ const {
 
 const SIZE = 400;
 const WHEEL_R = 161;
-const CENTER_X = SIZE / 2;
+const CENTER_X = SIZE/2;
 const CENTER_Y = 202;
-const SEGMENTS = [
-  { label: 'PROBLEME', name: '💣 Problème visé', color: 4, hint: 'Esty peut tirer un dossier avec `/probleme tirer`, puis décider de le révéler avec `/probleme reveler`.' },
-  { label: 'VERITE', name: '👀 Vérité', color: 5, hint: 'Esty pose une question vérité à la personne désignée. Elle peut passer.' },
-  { label: 'GAGE', name: '😈 Gage', color: 6, hint: 'Esty propose un petit défi drôle, toujours facultatif.' },
-];
-
+const SLICES = 12;
 const command = new SlashCommandBuilder()
-  .setName('roue')
-  .setDescription('🎡 Contrôler la roue animée des Problèmes d’Esty')
-  .addSubcommand(s => s.setName('installer').setDescription('Installer le bouton de la roue dans le salon d’animation'))
-  .addSubcommand(s => s.setName('acces').setDescription('Choisir qui peut faire tourner la roue')
-    .addStringOption(o => o.setName('mode').setDescription('Qui peut cliquer ?').setRequired(true)
-      .addChoices({ name: '👑 Esty seulement', value: 'prive' }, { name: '🎉 Tous les membres', value: 'tous' })))
-  .addSubcommand(s => s.setName('fermer').setDescription('Désactiver la roue et retirer son bouton'));
+  .setName('roue').setDescription('🎡 Les problèmes d’Esty : un tour = un problème')
+  .addSubcommand(s=>s.setName('installer').setDescription('Publier la roue et son bouton dans le salon'))
+  .addSubcommand(s=>s.setName('statut').setDescription('Voir combien de problèmes restent à tirer'))
+  .addSubcommand(s=>s.setName('acces').setDescription('Choisir qui peut faire tourner la roue')
+    .addStringOption(o=>o.setName('mode').setDescription('Accès au bouton').setRequired(true)
+      .addChoices({name:'👑 Esty seulement',value:'prive'},{name:'🎉 Tous les membres',value:'tous'})))
+  .addSubcommand(s=>s.setName('fermer').setDescription('Fermer les panneaux de la roue'))
+  .addSubcommand(s=>s.setName('aide').setDescription('Rappel des commandes et du fonctionnement'));
 
-// Choix volontaire : Esty seule par défaut, après chaque redémarrage.
-let mode = 'prive';
-let busy = false;
-// Le bot peut retrouver les roues encore visibles même après un redémarrage.
-async function findWheelCards(client) {
-  const channel = await client.channels.fetch(process.env.ANIMATION_CHANNEL_ID);
-  if (!channel?.messages?.fetch) throw new Error('Impossible de lire les messages du salon d’animation.');
-  const messages = await channel.messages.fetch({limit:100});
-  const cards = [...messages.values()].filter(m =>
-    m.author?.id === client.user.id &&
-    m.components?.some(row => row.components?.some(c => c.customId === 'estywheel:spin'))
-  );
-  return {channel, cards};
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let busy=false;
+async function findWheelCards(client){
+  const channel=await client.channels.fetch(process.env.ANIMATION_CHANNEL_ID);
+  if(!channel?.messages?.fetch) throw new Error('Salon d’animation inaccessible ou sans permission de lire les messages.');
+  const messages=await channel.messages.fetch({limit:100});
+  const cards=[...messages.values()].filter(m=>m.author?.id===client.user.id &&
+    m.components?.some(row=>row.components?.some(c=>c.customId==='estywheel:spin')));
+  return {channel,cards};
 }
 
 const PALETTE = [
@@ -82,11 +74,17 @@ const FONT = {
   'T':['11111','00100','00100','00100','00100','00100','00100'],
   'V':['10001','10001','10001','10001','10001','01010','00100'],
   'Y':['10001','10001','01010','00100','00100','00100','00100'],
-  ' ':['00000','00000','00000','00000','00000','00000','00000']
+  'U':['10001','10001','10001','10001','10001','10001','01110'],
+  'N':['10001','11001','10101','10011','10001','10001','10001'],
+  ' ':['00000','00000','00000','00000','00000','00000','00000'],
+  '?':['01110','10001','00001','00010','00100','00000','00100'],
+  '!':['00100','00100','00100','00100','00100','00000','00100'],
+  "'":['00100','00100','01000','00000','00000','00000','00000'],
+  'È':['00100','00010','11111','10000','11110','10000','11111'],
+  'É':['00100','01000','11111','10000','11110','10000','11111']
 };
 const TWOPI = Math.PI * 2;
 const mod = (a, n) => ((a % n) + n) % n;
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function put(pix, width, height, x, y, color) {
   x = Math.round(x); y = Math.round(y);
@@ -112,34 +110,34 @@ function textOn(pix, w, h, content, x, y, size, color, angle=0) {
   }
 }
 function makeWheelBase() {
-  const r = WHEEL_R, d=r*2+2;
-  const p = new Uint8Array(d*d).fill(0);
-  const cx=d/2, cy=d/2;
-  const sector = TWOPI/3;
-  for (let y=0;y<d;y++) for(let x=0;x<d;x++) {
-    const dx=x-cx,dy=y-cy, distance=Math.hypot(dx,dy);
-    if(distance>r+1) continue;
-    if(distance>r-7) {p[y*d+x]=2;continue;}
-    if(distance>r-11) {p[y*d+x]=10;continue;}
-    const angle=mod(Math.atan2(dx,-dy)+sector/2,TWOPI);
-    const index=Math.floor(angle/sector)%3;
-    const lineDistance=Math.min(mod(angle,sector), sector-mod(angle,sector));
-    let col=SEGMENTS[index].color;
-    if(lineDistance < 0.028 && distance>30) col=3;
-    else if(distance>r-31) col=col+3;
-    p[y*d+x]=col;
+  // Douze secteurs identiques en fonction : ils représentent simplement des dossiers.
+  // AUCUNE catégorie « Vérité » ou « Gage » sur la roue.
+  const r = WHEEL_R, d = r * 2 + 2;
+  const p = new Uint8Array(d * d).fill(0);
+  const cx = d / 2, cy = d / 2;
+  const sector = TWOPI / SLICES;
+  for (let y = 0; y < d; y++) for (let x = 0; x < d; x++) {
+    const dx = x - cx, dy = y - cy, distance = Math.hypot(dx, dy);
+    if (distance > r + 1) continue;
+    if (distance > r - 7) { p[y * d + x] = 2; continue; }
+    if (distance > r - 11) { p[y * d + x] = 10; continue; }
+    const angle = mod(Math.atan2(dx, -dy) + sector / 2, TWOPI);
+    const index = Math.floor(angle / sector) % SLICES;
+    const distanceToEdge = Math.min(mod(angle, sector), sector - mod(angle, sector));
+    const col = [4, 5, 6, 7, 8, 9][index % 6];
+    p[y * d + x] = (distanceToEdge < 0.018 && distance > 32) ? 3 : col;
   }
-  // Les textes font physiquement partie de la roue : ils tournent avec elle.
-  for(let i=0;i<3;i++) {
-    const angle=i*sector;
-    const x=cx+98*Math.sin(angle), y=cy-98*Math.cos(angle);
-    textOn(p,d,d,SEGMENTS[i].label,x+1,y+2,2,12,angle);
-    textOn(p,d,d,SEGMENTS[i].label,x,y,2,3,angle);
+  for (let j = 0; j < SLICES; j++) {
+    const angle = j * sector;
+    const x = cx + 106 * Math.sin(angle), y = cy - 106 * Math.cos(angle);
+    const letter = j % 3 === 0 ? '!' : '?';
+    textOn(p, d, d, letter, x + 1, y + 1, 2, 12, angle);
+    textOn(p, d, d, letter, x, y, 2, 3, angle);
   }
-  // Moyeu central
-  for(let y=cy-30;y<=cy+30;y++) for(let x=cx-30;x<=cx+30;x++) {
-    const dis=Math.hypot(x-cx,y-cy);
-    if(dis<29) p[Math.round(y)*d+Math.round(x)]=(dis>23?2:(dis>19?12:1));
+  // Moyeu central.
+  for (let y = cy - 30; y <= cy + 30; y++) for (let x = cx - 30; x <= cx + 30; x++) {
+    const dis = Math.hypot(x - cx, y - cy);
+    if (dis < 29) p[Math.round(y) * d + Math.round(x)] = (dis > 23 ? 2 : (dis > 19 ? 12 : 1));
   }
   return {pixels:p, d, cx, cy};
 }
@@ -150,8 +148,8 @@ function frame(rotation) {
   for(let y=0;y<SIZE;y++) for(let x=0;x<SIZE;x++) {
     if((x<12||x>SIZE-13||y<12||y>SIZE-13)) pix[y*SIZE+x]=1;
   }
-  textOn(pix,SIZE,SIZE,'LES PROBLEMES',CENTER_X,19,2,2);
-  textOn(pix,SIZE,SIZE,'ESTY EVENTS',CENTER_X,387,2,14);
+  textOn(pix,SIZE,SIZE,"LES PROBLÈMES D'ESTY",CENTER_X,19,2,2);
+  textOn(pix,SIZE,SIZE,'UN TOUR  UN DOSSIER',CENTER_X,387,2,14);
   for(let j=0;j<12;j++) {
     const a=j*TWOPI/12;
     const x=CENTER_X+177*Math.sin(a),y=CENTER_Y-177*Math.cos(a);
@@ -210,10 +208,11 @@ function lzwEncode(pixelData,minSize=4) {
   if(bits>0) bytes.push(acc&255);
   return Buffer.from(bytes);
 }
-function makeGif(winner) {
-  // 4 tours, ralentissement progressif et arrêt déterministe sur la catégorie tirée.
+function makeGif() {
+  // Une roue 100 % problèmes : l'arrêt est visuellement aléatoire,
+  // le vrai dossier est tiré au hasard dans PostgreSQL.
   const nb=23;
-  const total=TWOPI*4 - winner*(TWOPI/3);
+  const total=TWOPI*4 + crypto.randomInt(0, 360) * (Math.PI / 180);
   const out=[];
   const push=(...values)=>{out.push(Buffer.from(values));};
   const u16=n=>[n&255,(n>>8)&255];
@@ -241,90 +240,97 @@ function makeGif(winner) {
   return Buffer.concat(out);
 }
 
-function button(disabled=false) {
+function button(disabled=false){
   return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('estywheel:spin').setLabel('🎡 Faire tourner la roue')
+    new ButtonBuilder().setCustomId('estywheel:spin').setLabel('🎡 Faire tourner les problèmes')
       .setStyle(ButtonStyle.Primary).setDisabled(disabled)
   )];
 }
-function modeText() { return mode==='prive'?'👑 Seule Esty peut cliquer.':'🎉 Tous les membres peuvent cliquer.'; }
-const replyPrivate=(i,content)=>i.reply({content,flags:MessageFlags.Ephemeral});
-function description() {
-  return '# 🎡 LA ROUE DES PROBLÈMES D’ESTY\n'
-    + '💣 **Problème visé** • 👀 **Vérité** • 😈 **Gage**\n\n'
-    + `${modeText()}\n` + 'Clique sur le bouton pour découvrir le prochain défi ! 🍿';
+const privateReply=(i,content)=>i.reply({content,flags:MessageFlags.Ephemeral,allowedMentions:{parse:[]}});
+function description(settings){
+  return '# 🎡 LES PROBLÈMES D’ESTY\n'
+    + '💣 **Une roue. Un tirage. Un problème surprise !**\n\n'
+    + 'Clique sur **🎡 Faire tourner les problèmes** : la roue s’anime, s’arrête, et un dossier secret est révélé au hasard.\n'
+    + (settings.mode==='tous'?'🎉 Tous les membres peuvent lancer la roue.':'👑 Esty contrôle le bouton.')
+    + '\n\n💗 Les personnes citées peuvent passer ; les dossiers ne sont pas des accusations.';
 }
-async function handle(i, { guildId, ownerId, client }) {
-  const isCmd=i.isChatInputCommand() && i.commandName==='roue';
-  const isButton=i.isButton() && i.customId==='estywheel:spin';
-  if(!isCmd&&!isButton) return false;
-  if(i.guildId!==guildId) {await replyPrivate(i,'🔒 Cette roue est réservée au serveur Les Drôles d’Humains.');return true;}
-  if(isCmd) {
-    if(i.user.id!==ownerId) {await replyPrivate(i,'👑 Cette commande est réservée à Esty.');return true;}
+async function updateCards(client,settings){
+  const {cards}=await findWheelCards(client);
+  let count=0;
+  for(const m of cards) try{await m.edit({content:description(settings),components:button(),allowedMentions:{parse:[]}});count++;}catch(e){console.warn('Mise à jour roue :',e.message);}
+  return count;
+}
+async function handle(i,{guildId,ownerId,client}){
+  const isCmd=i.isChatInputCommand()&&i.commandName==='roue';
+  const isButton=i.isButton()&&i.customId==='estywheel:spin';
+  if(!isCmd&&!isButton)return false;
+  if(i.guildId!==guildId){await privateReply(i,'🔒 Ce jeu est réservé au serveur Les Drôles d’Humains.');return true;}
+  if(isCmd){
+    if(i.user.id!==ownerId){await privateReply(i,'👑 Ces commandes sont réservées à Esty.');return true;}
     const sub=i.options.getSubcommand();
-    if(sub==='installer') {
-      await i.deferReply({flags:MessageFlags.Ephemeral});
-      const channel=await client.channels.fetch(process.env.ANIMATION_CHANNEL_ID);
-      if(!channel?.isTextBased()||typeof channel.send!=='function') throw new Error('Salon ANIMATION_CHANNEL_ID inaccessible.');
-      const m=await channel.send({content:description(),components:button(),allowedMentions:{parse:[]}});
-      await i.editReply(`✅ Roue installée dans <#${channel.id}> ! Le bouton est prêt. 🎡`);
+    if(busy&&['fermer'].includes(sub)){await privateReply(i,'⏳ La roue tourne déjà.');return true;}
+    await i.deferReply({flags:MessageFlags.Ephemeral});
+    if(sub==='installer'){
+      const {cards,channel}=await findWheelCards(client);
+      if(cards.length){await updateCards(client,await store.settings(guildId));await i.editReply('🎡 Roue déjà installée : panneau mis à jour avec la nouvelle version **100 % problèmes**. Réutilise son bouton !');return true;}
+      const settings=await store.settings(guildId);
+      await channel.send({content:description(settings),components:button(),allowedMentions:{parse:[]}});
+      await i.editReply(`✅ Roue publiée dans <#${channel.id}>. Clique sur son bouton pour tirer un problème !`);return true;
+    }
+    if(sub==='statut'){
+      const [settings,counts]=await Promise.all([store.settings(guildId),store.problemStats(guildId)]);
+      await i.editReply(`🎡 **Les problèmes d’Esty**\n💣 Dossiers au total : **${counts.total}**\n🗃️ Encore à tirer : **${counts.pending}**\n🎯 Déjà réservé : **${counts.selected}**\n✅ Déjà sortis : **${counts.revealed}**\n👑 Accès : **${settings.mode==='prive'?'Esty':'tout le serveur'}**\n\nQuand la pioche est vide : \`/probleme recommencer confirmation:RECOMMENCER\`.`);
       return true;
     }
-    if(sub==='acces') {
-      await i.deferReply({flags:MessageFlags.Ephemeral});
-      mode=i.options.getString('mode')==='tous'?'tous':'prive';
-      let updated=0;
-      try {
-        const {cards}=await findWheelCards(client);
-        for(const m of cards) {await m.edit({content:description()});updated++;}
-      }catch(err) {console.warn('Cartes roue non actualisées :',err.message);}
-      await i.editReply(`✅ Nouveau mode : ${modeText()}\n${updated} panneau(x) actualisé(s). Mode Esty seule au redémarrage.`);
-      return true;
+    if(sub==='acces'){
+      const mode=i.options.getString('mode',true);
+      await store.setMode(guildId,mode);
+      await updateCards(client,await store.settings(guildId));
+      await i.editReply(`✅ La roue est accessible à : ${mode==='prive'?'Esty uniquement':'tous les membres'}.`);return true;
     }
-    if(sub==='fermer') {
-      await i.deferReply({flags:MessageFlags.Ephemeral});
+    if(sub==='fermer'){
       const {cards}=await findWheelCards(client);
       let count=0;
-      for(const m of cards) {
-        try {await m.edit({components:[],content:'🔒 **La roue des problèmes est fermée.**'});count++;}
-        catch(e) {console.warn('Roue non désactivée :',e.message);}
-      }
-      await i.editReply(count?`🔒 ${count} roue(s) désactivée(s) !`:'🔒 Aucune roue trouvée parmi les 100 derniers messages du salon. Supprime un éventuel ancien panneau manuellement.');
-      return true;
+      for(const m of cards){await m.edit({content:'🔒 **Les problèmes d’Esty : roue fermée.**',components:[]});count++;}
+      await i.editReply(`🔒 ${count} panneau(x) fermé(s). Si un panneau a plus de 100 messages, supprime-le manuellement.`);return true;
+    }
+    if(sub==='aide'){
+      await i.editReply('**🎡 Les problèmes d’Esty**\n1. \`/probleme ajouter\` pour enregistrer des dossiers.\n2. \`/roue installer\` pour afficher le bouton.\n3. Un clic = animation + problème tiré au sort et affiché automatiquement.\n\n**Commandes roue :** \`/roue installer\`, \`/roue statut\`, \`/roue acces\`, \`/roue fermer\`, \`/roue aide\`.\n**Pioche épuisée :** \`/probleme recommencer confirmation:RECOMMENCER\`.\nAucune vérité, aucun gage, aucune désignation de joueur nécessaire.');return true;
     }
     return true;
   }
-  if(mode==='prive' && i.user.id!==ownerId) {await replyPrivate(i,'👑 Seule Esty peut faire tourner cette roue pour le moment.');return true;}
-  if(busy) {await replyPrivate(i,'⏳ La roue tourne déjà ! Attends le résultat.');return true;}
+  const settings=await store.settings(guildId);
+  if(settings.mode==='prive'&&i.user.id!==ownerId){await privateReply(i,'👑 Seule Esty peut faire tourner la roue.');return true;}
+  if(busy){await privateReply(i,'⏳ La roue tourne déjà !');return true;}
   busy=true;
-  let marked=false;
-  try {
+  let disabled=false;
+  try{
     await i.deferUpdate();
-    await i.message.edit({components:button(true)});
-    marked=true;
-    const winner=crypto.randomInt(0,3);
-    const gif=makeGif(winner);
-    if(gif.length>7_500_000) throw new Error('Fichier GIF trop volumineux.');
-    await i.channel.send({
-      content:`# 🎡 LA ROUE TOURNE !\n${i.user} a lancé la roue des problèmes… 🍿`,
-      files:[new AttachmentBuilder(gif,{name:'roue-esty.gif'})],
-      allowedMentions:{parse:[]}
-    });
-    // Le GIF s'arrête sur la catégorie, puis le résultat arrive en clair.
-    await sleep(3100);
-    await i.channel.send({
-      content:`# 🎉 LA ROUE A CHOISI…\n## ${SEGMENTS[winner].name.toUpperCase()} !\n${SEGMENTS[winner].hint}\n\n🎤 **Esty, c’est à toi !**`,
-      allowedMentions:{parse:[]}
-    });
-  } catch(err) {
-    console.error('❌ Roue des problèmes:',err);
-    try {await i.followUp({content:'❌ La roue a rencontré une erreur : '+String(err.message).slice(0,180),flags:MessageFlags.Ephemeral});} catch {}
-  } finally {
-    if(marked) {
-      try {await i.message.edit({components:button()});}catch(e) {console.warn('Bouton roue:',e.message);}
+    // Rend le bouton temporairement inactif pour éviter les doubles clics.
+    await i.message.edit({components:button(true)});disabled=true;
+    const counts=await store.problemStats(guildId);
+    if(counts.pending+counts.selected===0){
+      await i.followUp({content:counts.total?'📭 Tous les problèmes sont passés ! Recommence la pioche avec `/probleme recommencer confirmation:RECOMMENCER`.':'📭 Aucun problème enregistré. Ajoute-en avec `/probleme ajouter`.',flags:MessageFlags.Ephemeral});
+      return true;
     }
+    // Réservation privée de l’aléa en base ; l'animation ne montre jamais le texte avant son arrêt.
+    const p=await db.drawProblem(guildId);
+    if(!p){await i.followUp({content:'📭 La pioche est vide.',flags:MessageFlags.Ephemeral});return true;}
+    const gif=makeGif();
+    if(gif.length>7_500_000)throw new Error('Animation GIF trop volumineuse.');
+    await i.channel.send({content:'# 🎡 LES PROBLÈMES D’ESTY\n💣 **La roue tourne... Quel dossier va sortir ?**',files:[new AttachmentBuilder(gif,{name:'les-problemes-d-esty.gif'})],allowedMentions:{parse:[]}});
+    await sleep(3100);
+    const mention=p.target?`🎯 **Personne visée :** ${p.target}\n`:'';
+    const body=`# 💣 BIM ! LE PROBLÈME EST TOMBÉ !\n**Dossier #${p.id}**\n${mention}\n${p.question}\n\n🎤 Place aux explications... ou au joker ! 💗`;
+    await i.channel.send({content:body,allowedMentions:{parse:[]}});
+    await db.revealProblem(guildId,p.id);
+  }catch(err){
+    console.error('❌ Roue :',err);
+    try{await i.followUp({content:'❌ Problème pendant le tirage : '+String(err.message).slice(0,180)+'\nSi un dossier a été réservé sans être affiché, utilise `/probleme remettre`.',flags:MessageFlags.Ephemeral});}catch{}
+  }finally{
+    if(disabled){try{await i.message.edit({components:button()});}catch(e){console.warn('Bouton :',e.message);}}
     busy=false;
   }
   return true;
 }
-module.exports={command,handle,makeGif,button};
+module.exports={command,handle,makeGif,button,isBusy:()=>busy};

@@ -1,0 +1,37 @@
+🎡 LES PROBLÈMES D’ESTY — VERSION « ROUE UNIQUEMENT »
+LES DRÔLES D’HUMAINS — 28 OCTOBRE 2026
+
+CE PACK S’INSTALLE APRÈS LA FINALE DE LA REINE DES CŒURS.
+Ne l’installe pas au milieu de la finale : bot.js remplace la version qui gérait /reine et /coeur.
+
+PRINCIPE :
+• Une roue nommée « LES PROBLÈMES D’ESTY » (sans vérités ni gages).
+• Esty lance /roue installer une seule fois.
+• Un clic sur « Faire tourner les problèmes » fait tourner un GIF et révèle automatiquement
+  UN problème pris au hasard dans la table PostgreSQL « problems ».
+• Aucune commande /roue designer, aucune personne à sélectionner d’abord.
+• Le champ « Personne visée » du problème est affiché s’il est renseigné.
+• Aucun problème ne se répète pendant le même cycle.
+• En fin de pioche : /probleme recommencer confirmation:RECOMMENCER.
+
+PROBLÈMES DÉJÀ EXISTANTS :
+La base Neon est conservée : n’efface pas DATABASE_URL ni les tables PostgreSQL.
+Les 200 problèmes proposés dans ChatGPT ne sont PAS importés automatiquement.
+Ajoute tes propres dossiers avec /probleme ajouter (formulaire).
+
+INSTALLATION :
+1. FINIR et SAUVEGARDER les résultats de la Reine des Cœurs.
+2. Sauvegarder le dépôt GitHub et, idéalement, une sauvegarde Neon.
+3. Remplacer les fichiers du projet par ceux de cette archive, à la RACINE.
+4. Supprimer les anciens modules reine*.js et reine*.db? selon les noms présents :
+   reine.js / reine-db.js / reine-finale.js / reine-finale-db.js,
+   MAIS uniquement après la finale et après sauvegarde.
+5. Ne pas effacer db.js ni DATABASE_URL, ni les tables rc_* de Neon.
+6. Sur ecloudserv, déployer la dernière version et redémarrer.
+7. Fichier de démarrage : index.js (secours intégré) ; bot.js fonctionne aussi.
+8. Vérifier que les commandes /roue et /probleme sont apparues sur Discord.
+
+Guide détaillé : GUIDE_INSTALLATION_COMMANDES.md
+
+IMPORTANT : syntaxe JavaScript et tirage simulé vérifiés. Pas de connexion réelle
+à Discord/ecloudserv/Neon depuis cette session. Teste d’abord un dossier factice.

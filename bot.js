@@ -6,9 +6,9 @@ const {
 const commands = require('./commands');
 const db = require('./db');
 const game = require('./index');
-const reine = require('./reine');
-// 🎡 Nouvelle roue animée des Problèmes d'Esty.
+// 🎡 Roue simple : uniquement les dossiers Problèmes d’Esty.
 const roue = require('./roue');
+const wheelStore = require('./wheel-db');
 const ENV = ['DISCORD_TOKEN','GUILD_ID','OWNER_ID','ANIMATION_CHANNEL_ID','DATABASE_URL'];
 const missing = ENV.filter(k => !process.env[k] || process.env[k].startsWith('COLLER_') ||
   process.env[k].startsWith('ID_') || process.env[k].startsWith('TON_') ||
@@ -76,11 +76,12 @@ async function handleProblem(i, sub) {
   }
   await i.deferReply({flags:E});
   if (sub==='liste') {
-    const {rows,total} = await db.listProblems(guildId);
+    const page=i.options.getInteger('page')||1;
+    const {rows,total} = await db.listProblems(guildId,page);
     if (!total) return i.editReply('💌 Aucun dossier pour le moment. Utilise `/probleme ajouter`.');
     const lines = rows.slice(0,15).map(p =>
       `**#${p.id}** ${p.state==='pending'?'🗃️ À tirer':p.state==='selected'?'🎯 Tiré':'✅ Révélé'} — ${p.question.replace(/\s+/g,' ').slice(0,74)}${p.question.length>74?'…':''}`);
-    return i.editReply(`🔒 **Dossiers enregistrés : ${total}** (15 plus récents)\n${lines.join('\n')}\nVoir le texte complet : \`/probleme voir\`.`);
+    return i.editReply(`🔒 **Dossiers enregistrés : ${total}** — page ${page}/${Math.max(1,Math.ceil(total/15))}\n${lines.join('\n')||'Aucun dossier sur cette page.'}\nVoir le texte complet : \`/probleme voir\`.`);
   }
   if (sub==='voir') {
     const p = await db.problemById(guildId, i.options.getInteger('id'));
@@ -90,15 +91,25 @@ async function handleProblem(i, sub) {
     const p = await db.deleteProblem(guildId,i.options.getInteger('id'));
     return i.editReply(p ? `🗑️ Dossier #${p.id} supprimé définitivement.` : '❌ Dossier introuvable.');
   }
+  if (sub==='recommencer') {
+    if (roue.isBusy()) return i.editReply('⏳ Attends la fin du tour avant de recommencer la pioche.');
+    if (i.options.getString('confirmation',true)!=='RECOMMENCER')
+      return i.editReply('❌ Confirmation incorrecte : écris exactement RECOMMENCER.');
+    const n=await db.restartProblemDraws(guildId);
+    return i.editReply(`🔄 Pioche réinitialisée : **${n} dossier(s)** remis en jeu. Aucun texte supprimé.`);
+  }
   if (sub==='tirer') {
+    if (roue.isBusy()) return i.editReply('⏳ Attends la fin du tour de roue.');
     const p = await db.drawProblem(guildId);
     return i.editReply(p ? `🎲 **Dossier #${p.id} tiré, gardé secret !**\n🎯 ${p.target||'Libre'}\n📝 ${p.question}\n\nPour le publier : \`/probleme reveler\`. Pour l'annuler : \`/probleme remettre\`.` : '📭 Plus aucun dossier inédit disponible.');
   }
   if (sub==='remettre') {
+    if (roue.isBusy()) return i.editReply('⏳ Attends la fin du tour de roue.');
     const p = await db.returnProblem(guildId);
     return i.editReply(p ? `↩️ Dossier #${p.id} remis dans la pioche.` : 'Aucun dossier sélectionné.');
   }
   if (sub==='reveler') {
+    if (roue.isBusy()) return i.editReply('⏳ Attends la fin du tour de roue.');
     const p = await db.getSelectedProblem(guildId);
     if (!p) return i.editReply('🎲 Aucun dossier sélectionné. Utilise `/probleme tirer`.');
     const channel = await channelFor();
@@ -215,7 +226,7 @@ async function handleModal(i) {
     await i.deferReply({flags:E});
     if (i.customId==='problem:add') {
       const p = await db.addProblem(guildId,question,target,sender);
-      return i.editReply(`🔒 Dossier **#${p.id}** enregistré ! Il restera secret jusqu’à /probleme reveler.`);
+      return i.editReply(`🔒 Dossier **#${p.id}** enregistré ! Il pourra sortir automatiquement au prochain tour de roue.`);
     }
     const id = Number(i.customId.split(':')[2]);
     const p = await db.updateProblem(guildId,id,question,target,sender);
@@ -243,7 +254,6 @@ client.on(Events.InteractionCreate,async i=>{
   try {
     // La roue traite ses propres boutons et commandes sans gêner la Reine.
     if (await roue.handle(i,{guildId,ownerId,client})) return;
-    if (await reine.handle(i)) return;
     if (i.isButton() && i.customId.startsWith('vote:')) {
       if (i.guildId!==guildId) return i.reply({content:'Vote indisponible ici.',flags:E});
       const [,id,k] = i.customId.split(':');
@@ -272,15 +282,15 @@ client.once(Events.ClientReady,async ready=>{
   console.log(`✅ Esty Events connecté : ${ready.user.tag}`);
   try {
     const rest = new REST({version:'10'}).setToken(process.env.DISCORD_TOKEN);
-    await rest.put(Routes.applicationGuildCommands(ready.user.id,guildId),{body:[...commands,reine.command,reine.extraCommand,roue.command].map(c=>c.toJSON())});
-    console.log('✅ Commandes /probleme, /animation, /reine, /coeur et /roue synchronisées sur LDH.');
+    await rest.put(Routes.applicationGuildCommands(ready.user.id,guildId),{body:[...commands,roue.command].map(c=>c.toJSON())});
+    console.log('✅ Commandes /probleme, /animation et /roue synchronisées sur LDH.');
   } catch(e) { console.error('❌ Enregistrement des commandes :',e); }
 });
 (async()=>{
   try {
     await db.initDb();
-    await reine.init(client,guildId,ownerId);
-    console.log('✅ Bases PostgreSQL (Problèmes et Reine des Cœurs) prêtes.');
+    await wheelStore.init(guildId);
+    console.log('✅ PostgreSQL (dossiers des Problèmes d’Esty + roue) prêt.');
     await client.login(process.env.DISCORD_TOKEN);
   } catch(e) {
     console.error('❌ Impossible de démarrer Esty Events :',e);

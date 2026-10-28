@@ -1,46 +1,21 @@
 /**
- * ESTY EVENTS — FICHIER À CHANGER POUR CHAQUE ANIMATION.
- * Tu peux remplacer CE fichier sur GitHub sans toucher à bot.js ni db.js.
- * Les problèmes ajoutés avec /probleme ajouter sont dans PostgreSQL.
+ * Configuration du jeu « Les problèmes d’Esty ».
+ * Les dossiers sont dans Neon/PostgreSQL et ne sont PAS effacés en remplaçant ce fichier.
  */
-module.exports = {
-  title: '🎡 LES PROBLÈMES D’ESTY',
-
-  announcement: [
-    '# 🔥 AYO LES PROBLÈÈÈMES !',
-    'La Reine des Problèmes débarque sur **Les Drôles d’Humains** ! 👑',
-    'Au programme : vérités, dilemmes, gages et dossiers surprises.',
-    '🗓️ Date et heure : à annoncer par Esty.',
-    '💗 Chacun peut passer une question ; pas de harcèlement ni de révélation de données privées.'
+module.exports={
+  title:'🎡 LES PROBLÈMES D’ESTY',
+  announcement:[
+    '# 🎡 LES PROBLÈMES D’ESTY !',
+    'Une roue, un bouton... et un problème surprise à chaque tour ! 💣',
+    'Qui sera cité ? Quel dossier sortira ? 😈',
+    '💗 Chacun a le droit de passer ; les dossiers servent à s’amuser, pas à accuser.'
   ].join('\n'),
-
-  intro: '🎤 **Bienvenue aux Problèmes d’Esty !** Esty contrôle le rythme avec ses commandes. Que les dossiers commencent !',
-  outro: '💋 **Fin de l’animation !** Merci les Drôles d’Humains. Les dossiers non révélés restent dans la base pour une prochaine fois.',
-
-  // /animation suivant affiche une étape à la fois.
-  // Les dossiers reçus en MP ne se mettent pas ici : /probleme ajouter.
-  steps: [
-    {
-      type: 'message',
-      content: '🔥 **Manche 1 — On se chauffe !** Préparez-vous à répondre sans vous cacher !'
-    },
-    {
-      type: 'qcm',
-      question: '🎡 Pour cette soirée, vous préférez quoi ?',
-      options: ['Les révélations', 'Les gages', 'Les dilemmes', 'Tout à la fois 😈']
-    },
-    {
-      type: 'message',
-      content: '💌 **C’est l’heure des dossiers !** Esty peut utiliser /probleme tirer puis /probleme reveler.'
-    },
-    {
-      type: 'qcm',
-      question: '💬 On augmente le niveau ?',
-      options: ['Oui, carrément 🔥', 'On reste soft 🌸', 'Surprise 🎁']
-    }
-  ]
+  intro:'👑 Bienvenue aux Problèmes d’Esty ! Cliquez sur la roue pour révéler vos dossiers.',
+  outro:'💗 Fin des Problèmes d’Esty ! Les dossiers non tirés restent sauvegardés.',
+  steps:[] // Pas de manches QCM, ni de vérités ou de gages dans ce jeu.
 };
-if (!module.parent || !module.parent.filename?.endsWith('/bot.js')) {
-  console.log('Lancement de Maitresse du jeu...');
+// Démarrage de secours ecloudserv : index.js OU bot.js. Évite un double lancement.
+if(require.main===module){
+  console.log('🚀 Lancement des Problèmes d’Esty depuis index.js...');
   require('./bot.js');
 }
