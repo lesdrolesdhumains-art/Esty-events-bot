@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Les Problèmes d’Esty : UN bouton, UN tirage aléatoire de dossier PostgreSQL.
+ * Les Problèmes d’Esty : bouton OU /roue lancer, UN dossier aléatoire PostgreSQL.
  * Les anciennes vérités et gages ne sont pas chargés ni utilisés.
  * Compatibilité : le panneau « estywheel:spin » de l'ancienne roue reste cliquable.
  */
@@ -20,6 +20,7 @@ const SLICES = 12;
 const command = new SlashCommandBuilder()
   .setName('roue').setDescription('🎡 Les problèmes d’Esty : un tour = un problème')
   .addSubcommand(s=>s.setName('installer').setDescription('Publier la roue et son bouton dans le salon'))
+  .addSubcommand(s=>s.setName('lancer').setDescription('Animer la roue et révéler automatiquement un problème'))
   .addSubcommand(s=>s.setName('statut').setDescription('Voir combien de problèmes restent à tirer'))
   .addSubcommand(s=>s.setName('acces').setDescription('Choisir qui peut faire tourner la roue')
     .addStringOption(o=>o.setName('mode').setDescription('Accès au bouton').setRequired(true)
@@ -250,7 +251,7 @@ const privateReply=(i,content)=>i.reply({content,flags:MessageFlags.Ephemeral,al
 function description(settings){
   return '# 🎡 LES PROBLÈMES D’ESTY\n'
     + '💣 **Une roue. Un tirage. Un problème surprise !**\n\n'
-    + 'Clique sur **🎡 Faire tourner les problèmes** : la roue s’anime, s’arrête, et un dossier secret est révélé au hasard.\n'
+    + 'Clique sur **🎡 Faire tourner les problèmes**, ou utilise **`/roue lancer`** : la roue s’anime et dévoile un dossier secret au hasard.\n'
     + (settings.mode==='tous'?'🎉 Tous les membres peuvent lancer la roue.':'👑 Esty contrôle le bouton.')
     + '\n\n💗 Les personnes citées peuvent passer ; les dossiers ne sont pas des accusations.';
 }
@@ -260,6 +261,69 @@ async function updateCards(client,settings){
   for(const m of cards) try{await m.edit({content:description(settings),components:button(),allowedMentions:{parse:[]}});count++;}catch(e){console.warn('Mise à jour roue :',e.message);}
   return count;
 }
+// Même tirage sécurisé pour le bouton historique et la commande /roue lancer.
+// Cette commande publie une NOUVELLE animation dans le salon d'animation à chaque tour.
+async function spinProblem(i,{guildId,client,viaButton}){
+  if(busy){await privateReply(i,'⏳ La roue tourne déjà !');return true;}
+  busy=true;
+  let disabled=false;
+  try{
+    if(viaButton){
+      await i.deferUpdate();
+      // Le panneau reste utilisable pour ceux qui préfèrent le bouton.
+      await i.message.edit({components:button(true)});disabled=true;
+    }else{
+      // Réponse privée pour ne pas encombrer le salon ; l'animation est publique.
+      await i.deferReply({flags:MessageFlags.Ephemeral});
+    }
+    const channel=viaButton ? i.channel : await client.channels.fetch(process.env.ANIMATION_CHANNEL_ID);
+    if(!channel || typeof channel.send!=='function')
+      throw new Error('Salon d’animation inaccessible. Vérifie ANIMATION_CHANNEL_ID et les permissions du bot.');
+    const counts=await store.problemStats(guildId);
+    if(counts.pending+counts.selected===0){
+      const message=counts.total
+        ? '📭 Tous les problèmes sont passés ! Recommence la pioche avec `/probleme recommencer confirmation:RECOMMENCER`.'
+        : '📭 Aucun problème enregistré. Ajoute-en avec `/probleme ajouter`.';
+      if(viaButton) await i.followUp({content:message,flags:MessageFlags.Ephemeral});
+      else await i.editReply(message);
+      return true;
+    }
+    // La base réserve le dossier avant l'affichage : pas de double tirage ni répétition.
+    const p=await db.drawProblem(guildId);
+    if(!p){
+      if(viaButton) await i.followUp({content:'📭 La pioche est vide.',flags:MessageFlags.Ephemeral});
+      else await i.editReply('📭 La pioche est vide.');
+      return true;
+    }
+    const gif=makeGif();
+    if(gif.length>7_500_000)throw new Error('Animation GIF trop volumineuse.');
+    await channel.send({
+      content:'# 🎡 LES PROBLÈMES D’ESTY\n💣 **La roue tourne... Quel dossier va sortir ?**',
+      files:[new AttachmentBuilder(gif,{name:'les-problemes-d-esty.gif'})],
+      allowedMentions:{parse:[]}
+    });
+    await sleep(3100);
+    const mention=p.target?`🎯 **Personne visée :** ${p.target}\n`:'';
+    const body=`# 💣 BIM ! LE PROBLÈME EST TOMBÉ !\n**Dossier #${p.id}**\n${mention}\n${p.question}\n\n🎤 Place aux explications... ou au joker ! 💗`;
+    await channel.send({content:body,allowedMentions:{parse:[]}});
+    await db.revealProblem(guildId,p.id);
+    if(!viaButton) await i.editReply(`✅ La roue a tourné ! Dossier #${p.id} dévoilé dans <#${channel.id}>.`);
+  }catch(err){
+    console.error('❌ Roue :',err);
+    const message='❌ Problème pendant le tirage : '+String(err.message).slice(0,180)
+      +'\nSi un dossier a été réservé sans être affiché, utilise `/probleme remettre`.';
+    try{
+      if(!viaButton && i.deferred) await i.editReply(message);
+      else if(i.deferred||i.replied) await i.followUp({content:message,flags:MessageFlags.Ephemeral});
+      else await privateReply(i,message);
+    }catch(e){console.warn('Réponse après erreur roue :',e.message);}
+  }finally{
+    if(disabled){try{await i.message.edit({components:button()});}catch(e){console.warn('Bouton :',e.message);}}
+    busy=false;
+  }
+  return true;
+}
+
 async function handle(i,{guildId,ownerId,client}){
   const isCmd=i.isChatInputCommand()&&i.commandName==='roue';
   const isButton=i.isButton()&&i.customId==='estywheel:spin';
@@ -268,6 +332,7 @@ async function handle(i,{guildId,ownerId,client}){
   if(isCmd){
     if(i.user.id!==ownerId){await privateReply(i,'👑 Ces commandes sont réservées à Esty.');return true;}
     const sub=i.options.getSubcommand();
+    if(sub==='lancer')return spinProblem(i,{guildId,client,viaButton:false});
     if(busy&&['fermer'].includes(sub)){await privateReply(i,'⏳ La roue tourne déjà.');return true;}
     await i.deferReply({flags:MessageFlags.Ephemeral});
     if(sub==='installer'){
@@ -295,42 +360,12 @@ async function handle(i,{guildId,ownerId,client}){
       await i.editReply(`🔒 ${count} panneau(x) fermé(s). Si un panneau a plus de 100 messages, supprime-le manuellement.`);return true;
     }
     if(sub==='aide'){
-      await i.editReply('**🎡 Les problèmes d’Esty**\n1. \`/probleme ajouter\` pour enregistrer des dossiers.\n2. \`/roue installer\` pour afficher le bouton.\n3. Un clic = animation + problème tiré au sort et affiché automatiquement.\n\n**Commandes roue :** \`/roue installer\`, \`/roue statut\`, \`/roue acces\`, \`/roue fermer\`, \`/roue aide\`.\n**Pioche épuisée :** \`/probleme recommencer confirmation:RECOMMENCER\`.\nAucune vérité, aucun gage, aucune désignation de joueur nécessaire.');return true;
+      await i.editReply('**🎡 Les problèmes d’Esty**\n1. `/probleme ajouter` pour enregistrer des dossiers.\n2. `/roue lancer` pour afficher une nouvelle roue animée et révéler automatiquement un problème.\n3. Ancienne option : `/roue installer` pour afficher le panneau et son bouton.\n\n**Commandes roue :** `/roue lancer`, `/roue installer`, `/roue statut`, `/roue acces`, `/roue fermer`, `/roue aide`.\n**Pioche épuisée :** `/probleme recommencer confirmation:RECOMMENCER`.\nAucune vérité, aucun gage, aucune désignation de joueur nécessaire.');return true;
     }
     return true;
   }
   const settings=await store.settings(guildId);
   if(settings.mode==='prive'&&i.user.id!==ownerId){await privateReply(i,'👑 Seule Esty peut faire tourner la roue.');return true;}
-  if(busy){await privateReply(i,'⏳ La roue tourne déjà !');return true;}
-  busy=true;
-  let disabled=false;
-  try{
-    await i.deferUpdate();
-    // Rend le bouton temporairement inactif pour éviter les doubles clics.
-    await i.message.edit({components:button(true)});disabled=true;
-    const counts=await store.problemStats(guildId);
-    if(counts.pending+counts.selected===0){
-      await i.followUp({content:counts.total?'📭 Tous les problèmes sont passés ! Recommence la pioche avec `/probleme recommencer confirmation:RECOMMENCER`.':'📭 Aucun problème enregistré. Ajoute-en avec `/probleme ajouter`.',flags:MessageFlags.Ephemeral});
-      return true;
-    }
-    // Réservation privée de l’aléa en base ; l'animation ne montre jamais le texte avant son arrêt.
-    const p=await db.drawProblem(guildId);
-    if(!p){await i.followUp({content:'📭 La pioche est vide.',flags:MessageFlags.Ephemeral});return true;}
-    const gif=makeGif();
-    if(gif.length>7_500_000)throw new Error('Animation GIF trop volumineuse.');
-    await i.channel.send({content:'# 🎡 LES PROBLÈMES D’ESTY\n💣 **La roue tourne... Quel dossier va sortir ?**',files:[new AttachmentBuilder(gif,{name:'les-problemes-d-esty.gif'})],allowedMentions:{parse:[]}});
-    await sleep(3100);
-    const mention=p.target?`🎯 **Personne visée :** ${p.target}\n`:'';
-    const body=`# 💣 BIM ! LE PROBLÈME EST TOMBÉ !\n**Dossier #${p.id}**\n${mention}\n${p.question}\n\n🎤 Place aux explications... ou au joker ! 💗`;
-    await i.channel.send({content:body,allowedMentions:{parse:[]}});
-    await db.revealProblem(guildId,p.id);
-  }catch(err){
-    console.error('❌ Roue :',err);
-    try{await i.followUp({content:'❌ Problème pendant le tirage : '+String(err.message).slice(0,180)+'\nSi un dossier a été réservé sans être affiché, utilise `/probleme remettre`.',flags:MessageFlags.Ephemeral});}catch{}
-  }finally{
-    if(disabled){try{await i.message.edit({components:button()});}catch(e){console.warn('Bouton :',e.message);}}
-    busy=false;
-  }
-  return true;
+  return spinProblem(i,{guildId,client,viaButton:true});
 }
 module.exports={command,handle,makeGif,button,isBusy:()=>busy};
