@@ -6,6 +6,7 @@ const {
  ModalBuilder,TextInputBuilder,TextInputStyle,MessageFlags,REST,Routes,EmbedBuilder
 }=require('discord.js');
 const commands=require('./commands');
+const brawl=require('./brawl');
 const database=require('./champion-db');
 const bank=require('./banque');
 const {wordsOf,showWords,qualified,finalPoints,initialState,isStaff,canBuzz}=require('./champion-core');
@@ -448,6 +449,7 @@ async function tick(){
 client.on(Events.InteractionCreate,async i=>{
  try{
   if(!i.guildId||i.guildId!==GUILD)return;
+  if(i.isChatInputCommand() && i.commandName==='brawl')return await brawl.handle(i);
   if(i.isChatInputCommand() && i.commandName==='champion')return await doChat(i);
   if(i.isButton() && i.customId.startsWith('champ:'))return await doButton(i);
   if(i.isModalSubmit() && i.customId.startsWith('champ:'))return await doModal(i);
@@ -463,7 +465,7 @@ client.once(Events.ClientReady,async ready=>{
   const rest=new REST({version:'10'}).setToken(process.env.DISCORD_TOKEN);
   // Cette synchronisation REMPLACE les anciennes commandes du serveur /roue /probleme /animation.
   await rest.put(Routes.applicationGuildCommands(ready.user.id,GUILD),{body:commands.map(c=>c.toJSON())});
-  console.log('✅ /champion synchronisé ; les commandes de la Roue des problèmes sont retirées.');
+  console.log('✅ /champion et /brawl synchronisés ; anciennes commandes roue retirées.');
  }catch(e){console.error('❌ Échec synchronisation des commandes :',e);}
  // Le minuteur ne reprend pas à l’aveugle après redémarrage : /champion partie reprendre.
  setInterval(()=>tick().catch(e=>console.error('❌ Timer champion :',e)),2000).unref();
@@ -471,6 +473,7 @@ client.once(Events.ClientReady,async ready=>{
 (async()=>{
  try{
   await database.init();
+  await brawl.init();
   const s=await state();
   if(s.status==='running'){s.status='paused';await persist(s);console.log('⏸️ Partie sauvegardée mise en pause après redémarrage.');}
   await client.login(process.env.DISCORD_TOKEN);

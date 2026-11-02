@@ -45,4 +45,4 @@ c.addSubcommandGroup(g=>g.setName('score').setDescription('Classement et correct
   .addUserOption(o=>o.setName('membre').setDescription('Candidat').setRequired(true))
   .addIntegerOption(o=>o.setName('points').setDescription('Nouveau total de points').setRequired(true).setMinValue(0))));
 c.addSubcommand(s=>s.setName('aide').setDescription('Afficher les commandes essentielles'));
-module.exports=[c];
+module.exports=[c,require('./brawl').command];
