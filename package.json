@@ -1,19 +1,14 @@
 {
-  "name": "esty-events-bot",
-  "version": "1.0.0",
+  "name": "esty-events-les-droles-de-champions",
+  "version": "2.0.0",
   "private": true,
-  "description": "Bot d'animations semi-automatique pour Les Droles d'Humains",
+  "description": "La Maîtresse du Jeu — Questions pour un champion sur Discord",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check bot.js && node --check roue.js && node --check wheel-db.js && node --check db.js && node --check commands.js"
+    "check": "node --check index.js && node --check bot.js && node --check commands.js && node --check champion-db.js && node --check champion-core.js && node --check banque.js",
+    "test": "node --test tests/*.test.js"
   },
-  "engines": {
-    "node": ">=20.11.0"
-  },
-  "dependencies": {
-    "discord.js": "^14.19.3",
-    "dotenv": "^16.6.1",
-    "pg": "^8.16.0"
-  }
+  "engines": { "node": ">=22.0.0" },
+  "dependencies": { "discord.js": "^14.19.3", "dotenv": "^16.6.1", "pg": "^8.16.0" }
 }
