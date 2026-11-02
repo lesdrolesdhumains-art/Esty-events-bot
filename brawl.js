@@ -2,7 +2,7 @@
 /**
  * Mini-tournoi Brawlhalla (duels 1 contre 1) pour Maîtresse du Jeu.
  * Indépendant du moteur Les Drôles de Champions.
- * Usage : /brawl ajouter, /brawl binomes, /brawl resultat (+ /brawl reset).
+ * Usage : /brawl ajouter, /brawl binomes, /brawl resultat, /brawl classement (+ /brawl reset).
  */
 const {SlashCommandBuilder, MessageFlags} = require('discord.js');
 const {pool, get: getChampionState} = require('./champion-db');
@@ -16,6 +16,7 @@ const command = new SlashCommandBuilder()
     .addIntegerOption(o => o.setName('duel').setDescription('Numéro du duel tiré au sort').setRequired(true).setMinValue(1))
     .addStringOption(o => o.setName('gagnant').setDescription('Qui a gagné ?').setRequired(true)
       .addChoices({name:'Joueur 1 du duel',value:'1'}, {name:'Joueur 2 du duel',value:'2'})))
+  .addSubcommand(s => s.setName('classement').setDescription('Afficher le classement cumulé du tournoi'))
   .addSubcommand(s => s.setName('reset').setDescription('Effacer un tournoi terminé, pour en recommencer un')
     .addBooleanOption(o => o.setName('confirmer').setDescription('Confirmer la suppression des résultats et des inscriptions').setRequired(true)));
 
@@ -124,6 +125,9 @@ async function handle(i){
     const header=`🏆 **Duel #${id} validé !** ${safe(byId(s,winner))} gagne contre ${safe(byId(s,loser))}. **+1 point** pour le vainqueur.\n`;
     return header+(left?`⏳ ${left} duel(s) encore en attente sur ce tour.`:`\n🎉 **TOUR ${s.round} TERMINÉ !** Voici les résultats cumulés :`)+
       `\n\n📊 **Classement général (${s.round} tour${s.round===1?'':'s'})**\n${ranking(s)}`;
+   }
+   if(sub==='classement'){
+    return `📊 **BRAWLHALLA · CLASSEMENT CUMULÉ**\nTour(s) tiré(s) : **${s.round}**\n\n${ranking(s)}`;
    }
    if(sub==='reset'){
     if(i.user.id!==process.env.OWNER_ID)throw new Error('Seule Esty peut réinitialiser le tournoi.');

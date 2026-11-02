@@ -1,0 +1,23 @@
+👑 MAÎTRESSE DU JEU — CORRECTIF DÉMARRAGE ECLOUDSERV/PTERODACTYL
+
+1. Dans les réglages Startup d'ecloudserv, la variable MAIN_FILE doit contenir : bot.js
+   (PAS index.js, PAS node bot.js, PAS un chemin complet.)
+2. Sur GitHub, remplace bot.js, index.js, commands.js, package.json.
+   Ajoute s'ils manquent : brawl.js, champion-core.js, champion-db.js, banque.js.
+3. Garde les secrets DISCORD_TOKEN et DATABASE_URL sur ecloudserv, jamais dans GitHub.
+4. Redéploie et redémarre. Dans les logs, cherche :
+   🚀 Maîtresse du Jeu : lancement depuis bot.js (Champions + Brawlhalla)
+   ✅ Maîtresse du Jeu connectée : <pseudo du bot>
+   ✅ /champion et /brawl synchronisés
+5. Dans Discord, teste /champion aide et /brawl ajouter.
+
+EN CAS D'ERREUR :
+- [DEP0180] fs.Stats est un avertissement lié à ts-node, pas une erreur fatale à lui seul.
+- Si le lancement depuis bot.js ne s'affiche pas : vérifie l'emplacement du fichier et le déploiement.
+- Variables obligatoires absentes : configure DISCORD_TOKEN, DATABASE_URL, GUILD_ID, OWNER_ID dans ecloudserv.
+- Démarrage impossible : examine le détail de l'erreur (Neon, réseau, identifiants).
+- Échec synchronisation des commandes : vérifie GUILD_ID et les droits du bot.
+- Si Pterodactyl utilise un ts-node défectueux pour MAIN_FILE=bot.js : le modèle Startup de l'hébergeur doit être corrigé par son support. Le correctif index.js ne modifie pas la commande du démon Pterodactyl.
+
+Une sauvegarde GitHub et Neon est recommandée avant l'installation.
+Ne lance pas de SQL de suppression de l'ancien jeu pour réparer le démarrage.

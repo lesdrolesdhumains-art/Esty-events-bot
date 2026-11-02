@@ -1,4 +1,6 @@
 'use strict';
+// Point d'entrée principal d'ecloudserv : MAIN_FILE=bot.js (ne pas modifier).
+console.log('🚀 Maîtresse du Jeu : lancement depuis bot.js (Champions + Brawlhalla)');
 require('dotenv').config();
 const crypto=require('node:crypto');
 const {

@@ -8,27 +8,27 @@ Ce pack est un **remplacement complet du bot Roue des problèmes**, pas une mise
 
 **Aucun changement n'a été effectué sur GitHub, Discord, ecloudserv ni Neon par cette archive.**
 
-## 1. Démarrage : LE POINT IMPORTANT !
+## 1. Démarrage : MAIN_FILE = bot.js (OBLIGATOIRE)
 
-- `index.js` contient le démarrage réel : si exécuté directement, il lance `require('./bot.js')`.
-- `package.json` contient `main: index.js` et `start: node index.js`.
-- Configurez ecloudserv sur **Node.js 22** et démarrez par `npm start` ou `node index.js`.
-- Si ecloudserv lance directement `bot.js`, cela fonctionne aussi car `bot.js` démarre le client.
-- Le bot synchronise `/champion` dès sa connexion. Les anciennes commandes du serveur sont supprimées par la synchronisation.
-- Toutes les données des champions sont stockées dans de nouvelles tables PostgreSQL (`champion_states`, `champion_questions`). Le code **ne supprime pas** les données de l'ancien jeu en base.
+- Sur **ecloudserv/Pterodactyl**, garde `MAIN_FILE=bot.js`, sans chemin supplémentaire.
+- `bot.js` est le point d'entrée direct des modules **Les Drôles de Champions** et **Brawlhalla**.
+- `package.json` définit `main: bot.js` et `start: node bot.js`.
+- `index.js` est uniquement un filet de secours : il démarre aussi `bot.js` quand un ancien lancement vise `index.js`, y compris avec `ts-node --esm`.
+- Un avertissement `[DEP0180] fs.Stats` peut venir du lanceur `ts-node`; à lui seul il ne prouve pas un échec du bot.
+- Aucune ancienne donnée PostgreSQL n'est effacée automatiquement pendant l'installation.
 
 ## 2. Mise en place depuis l'iPhone (GitHub / ecloudserv)
 
 1. Sauvegardez le dépôt GitHub et effectuez si possible un snapshot de Neon. Évitez les mises à jour en pleine soirée.
 2. Décompressez cette archive dans l'application Fichiers de l'iPhone.
-3. Vérifiez le dépôt et le service ecloudserv réellement actifs. Si vous utilisez encore le **bot Roue seul**, remplacez/ajoutez à la racine de votre dépôt les fichiers : `index.js`, `bot.js`, `commands.js`, `champion-core.js`, `champion-db.js`, `banque.js`, `package.json`, `.gitignore`, `.env.example`.
+3. Vérifiez le dépôt et le service ecloudserv réellement actifs. Si vous utilisez encore le **bot Roue seul**, remplacez/ajoutez à la racine de votre dépôt les fichiers : `bot.js`, `index.js`, `commands.js`, `brawl.js`, `champion-core.js`, `champion-db.js`, `banque.js`, `package.json` ; conserve `.gitignore`, tes variables sur ecloudserv et `.env.example` si tu en as un.
 4. Supprimez les anciens fichiers **du jeu des problèmes** : `roue.js`, `wheel-db.js`, et l'ancien `db.js` (à condition qu'il ne serve à aucun autre module). Si des modules Reine des Cœurs ou Don Juan sont encore actifs sur votre version réelle, **ne remplacez pas leur moteur à l'aveugle** : ce pack doit alors être fusionné avec leur code.
 5. Ne téléversez PAS les vraies variables secrètes dans GitHub, même dans un dépôt privé. Gardez `DISCORD_TOKEN` et `DATABASE_URL` dans le panneau ecloudserv.
 6. Vérifiez les variables existantes : `DISCORD_TOKEN`, `DATABASE_URL`, `GUILD_ID`, `OWNER_ID`, `ANIMATION_CHANNEL_ID` (facultative si `/champion installer` a été utilisé). Les variables ont le même sens que dans l'ancien pack.
-7. Sur ecloudserv : Node.js 22 ; `npm install` puis `node index.js` ou `npm start`. Contrôlez les logs :
-   - `🚀 Démarrage de La Maîtresse du Jeu — Les Drôles de Champions…`
+7. Sur ecloudserv : Node.js 22 et surtout `MAIN_FILE=bot.js`. Après le déploiement, redémarre puis contrôle les logs :
+   - `🚀 Maîtresse du Jeu : lancement depuis bot.js (Champions + Brawlhalla)`
    - `✅ Maîtresse du Jeu connectée`
-   - `✅ /champion synchronisé`
+   - `✅ /champion et /brawl synchronisés`
 8. Dans Discord, tapez `/champion aide`, puis installez le plateau avec `/champion installer salon:#votre-salon`.
 9. Faites une soirée test à 2 candidats avant la vraie animation.
 
