@@ -6,7 +6,7 @@ const {
  ActionRowBuilder,ButtonBuilder,ButtonStyle,ModalBuilder,TextInputBuilder,TextInputStyle
 }=require('discord.js');
 const {TIERS,BASE_TIERS,normalize,safe,dayParis,chooseTier,parseItems,formatCode}=require('./cartes-utils');
-const {prepareImage,cutPlanche,panel}=require('./cartes-render');
+const {prepareImage,cutPlanche,sheetInfo,cutOne,validateBox,panel}=require('./cartes-render');
 const EP=MessageFlags.Ephemeral;
 let pool=null,botClient=null;
 const imports=new Map(),albums=new Map(),testResets=new Map();
@@ -42,6 +42,14 @@ admin.addSubcommand(s=>s.setName('importer-planche').setDescription('Importer un
  .addAttachmentOption(o=>o.setName('planche').setDescription('Image de la planche').setRequired(true))
  .addStringOption(o=>o.setName('disposition').setDescription('Choisis 3 en haut + 2 en bas pour tes planches illustrées').setRequired(true)
   .addChoices({name:'3 cartes en haut + 2 en bas (planches LDH)',value:'trois_deux'},{name:'5 cartes côte à côte',value:'horizontale'},{name:'5 cartes les unes sous les autres',value:'verticale'})));
+admin.addSubcommand(s=>s.setName('corriger-planche').setDescription('Remplacer les 5 images sans toucher aux collections')
+ .addStringOption(o=>o.setName('nom').setDescription('Nom du personnage déjà enregistré').setMinLength(2).setMaxLength(50).setRequired(true))
+ .addAttachmentOption(o=>o.setName('planche').setDescription('Planche corrigée en image').setRequired(true))
+ .addStringOption(o=>o.setName('disposition').setDescription('Disposition des 5 cartes').setRequired(true)
+  .addChoices({name:'3 en haut + 2 en bas',value:'trois_deux'},{name:'5 côte à côte',value:'horizontale'},{name:'5 empilées',value:'verticale'})));
+admin.addSubcommand(s=>s.setName('corriger-image').setDescription('Remplacer une image existante sans changer son numéro')
+ .addStringOption(o=>o.setName('code').setDescription('Code officiel (ex. C-00007 ou P-00003)').setRequired(true))
+ .addAttachmentOption(o=>o.setName('image').setDescription('Nouvelle carte individuelle').setRequired(true)));
 admin.addSubcommand(s=>s.setName('ajouter-prestige').setDescription('Ajouter une Légende des Légendaires')
  .addStringOption(o=>o.setName('titre').setDescription('Titre de la carte spéciale').setMinLength(3).setMaxLength(100).setRequired(true))
  .addAttachmentOption(o=>o.setName('image').setDescription('Image de la carte Prestige').setRequired(true)));
@@ -274,52 +282,176 @@ function expirePending(){
  const now=Date.now();for(const [k,v] of imports)if(now-v.created>600000)imports.delete(k);
  for(const [k,v] of albums)if(now-v.created>900000)albums.delete(k);
 }
+const NAMES=['Commune','Peu commune','Rare','Épique','Légendaire'];
+function pendingImport(i,token){
+ const p=imports.get(token);
+ if(!p||p.guild!==i.guildId||p.author!==i.user.id||Date.now()-p.created>600000)err('Aperçu expiré. Relance la commande pour importer tes cartes.');
+ return p;
+}
+function previewPayload(p,token){
+ const n=p.images.length,idx=p.current||0;
+ p.reviewed.add(idx);
+ const label=n===1?(p.mode==='prestige'?'Prestige':'Carte à corriger'):NAMES[idx];
+ const piece=p.boxes?.[idx];
+ const borders=piece?`\n📐 Zone ${idx+1} : gauche **${(piece[0]*100).toFixed(1)} %** · haut **${(piece[1]*100).toFixed(1)} %** · droite **${(piece[2]*100).toFixed(1)} %** · bas **${(piece[3]*100).toFixed(1)} %**`:'';
+ const inspected=p.reviewed.size;
+ const title=p.mode==='correction'?'CORRECTION des 5 cartes':p.mode==='single-fix'?'CORRECTION d’une carte':'IMPORT des cartes';
+ const top= n===1?`🖼️ **${title} : ${safe(p.name)}**`:`🖼️ **${title} : ${safe(p.name)}**\n🔎 **Aperçu individuel ${idx+1}/5 : ${label}** — examinées : **${inspected}/5**`;
+ const text=top+`\n${p.mode==='correction'||p.mode==='single-fix'?'✅ Les numéros et les collections seront conservés.':'⏳ Rien n’est encore enregistré.'}${piece?'\n🛠️ Si une bordure manque ou qu’une carte voisine apparaît, utilise les **flèches**, le rognage ou **Ajuster en %**.':''}${borders}`+
+  (n===5?'\n**Regarde les 5 cartes une par une avant de confirmer.**':'');
+ const rows=[];
+ if(n===5){
+  rows.push(rowButtons(NAMES.map((name,j)=>({id:`ldh:import:view:${token}:${j}`,label:`${p.reviewed.has(j)?'✓ ':''}${j+1} ${name.slice(0,9)}`,style:j===idx?ButtonStyle.Primary:ButtonStyle.Secondary}))));
+ }
+ if(p.source&&n===5){
+  rows.push(rowButtons([
+   {id:`ldh:import:nudge:${token}:L`,label:'⬅ Gauche'},
+   {id:`ldh:import:nudge:${token}:U`,label:'⬆ Haut'},
+   {id:`ldh:import:nudge:${token}:D`,label:'⬇ Bas'},
+   {id:`ldh:import:nudge:${token}:R`,label:'➡ Droite'}
+  ]));
+  rows.push(rowButtons([
+   {id:`ldh:import:nudge:${token}:IN`,label:'🔍 Rogner les bords'},
+   {id:`ldh:import:nudge:${token}:OUT`,label:'↔ Élargir la zone'},
+   {id:`ldh:import:adjust:${token}`,label:'✏️ Ajuster en %'}
+  ]));
+ }
+ const actions=[];
+ actions.push({id:`ldh:import:ok:${token}`,label:'✅ Confirmer',style:ButtonStyle.Success,disabled:n===5&&p.reviewed.size!==5});
+ actions.push({id:`ldh:import:no:${token}`,label:'Annuler',style:ButtonStyle.Danger});
+ rows.push(rowButtons(actions));
+ return {content:text,files:[new AttachmentBuilder(p.images[idx],{name:`apercu-carte-${idx+1}.webp`})],components:rows,...noMentions};
+}
+async function previewImport(i,token,index){
+ const p=pendingImport(i,token);
+ if(!Number.isInteger(index)||index<0||index>=p.images.length)err('Numéro de carte invalide.');
+ await i.deferUpdate();p.current=index;
+ await i.editReply({...previewPayload(p,token),attachments:[]});
+}
+async function nudgeCrop(i,token,direction){
+ const p=pendingImport(i,token);
+ if(!p.source||!p.boxes)err('Cette importation ne contient pas de planche à ajuster.');
+ if(!(await canManage(i.guildId,i.user.id)))err('Accès refusé.');
+ const idx=p.current||0,box=p.boxes[idx].slice(),step=0.006;
+ if(direction==='L'){box[0]-=step;box[2]-=step;}
+ else if(direction==='R'){box[0]+=step;box[2]+=step;}
+ else if(direction==='U'){box[1]-=step;box[3]-=step;}
+ else if(direction==='D'){box[1]+=step;box[3]+=step;}
+ else if(direction==='IN'){box[0]+=step;box[1]+=step;box[2]-=step;box[3]-=step;}
+ else if(direction==='OUT'){box[0]-=step;box[1]-=step;box[2]+=step;box[3]+=step;}
+ else err('Réglage inconnu.');
+ // Garantit qu’aucune carte voisine ne rentre dans l’image par accident.
+ validateBox(box);
+ const newImage=await cutOne(p.source,box);
+ await i.deferUpdate();p.boxes[idx]=box;p.images[idx]=newImage;
+ p.reviewed.delete(idx);await i.editReply({...previewPayload(p,token),attachments:[]});
+}
+async function showCropModal(i,token){
+ const p=pendingImport(i,token);if(!p.source||!p.boxes)err('Cette importation utilise des images individuelles : aucun recadrage nécessaire.');
+ if(!(await canManage(i.guildId,i.user.id)))err('Accès à la modification refusé.');
+ const idx=p.current||0,box=p.boxes[idx];
+ const modal=new ModalBuilder().setCustomId(`ldh:import:crop:${token}:${idx}`).setTitle(`Ajuster la carte ${idx+1} sur 5`);
+ for(const [j,key,label] of [[0,'left','Bord gauche (%)'],[1,'top','Bord haut (%)'],[2,'right','Bord droit (%)'],[3,'bottom','Bord bas (%)']]){
+  modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(key).setLabel(label).setStyle(TextInputStyle.Short).setRequired(true).setValue((box[j]*100).toFixed(1)).setMinLength(1).setMaxLength(7)));
+ }
+ await i.showModal(modal);
+}
+async function saveCropModal(i,token,index){
+ const p=pendingImport(i,token);
+ if(!p.source||!p.boxes||index!==p.current)err('Sélection expirée. Rouvre la carte avant d’ajuster.');
+ if(!(await canManage(i.guildId,i.user.id)))err('Accès refusé.');
+ const box=['left','top','right','bottom'].map(k=>{
+  const raw=i.fields.getTextInputValue(k).trim().replace(',','.');
+  if(!/^\d+(?:\.\d{1,2})?$/.test(raw))err('Utilise un nombre entre 0 et 100 (ex. 34,5).');
+  return Number(raw)/100;
+ });
+ validateBox(box);
+ const image=await cutOne(p.source,box);
+ await i.deferUpdate();
+ p.boxes[index]=box;p.images[index]=image;p.current=index;
+ p.reviewed.delete(index); // L'aperçu corrigé doit être revu avant validation.
+ await i.editReply({...previewPayload(p,token),attachments:[]});
+}
 async function stageImport(i,kind){
  if(!(await canManage(i.guildId,i.user.id)))err('Gestion des cartes réservée à Esty et aux administrateurs autorisés.');
- await i.deferReply({flags:EP});
- expirePending();
- let name,images,mode='classique';
+ await i.deferReply({flags:EP});expirePending();
+ let name,images,mode='classique',source=null,boxes=null,targetCode=null;
  if(kind==='prestige'){
   name=i.options.getString('titre',true).trim();
   images=[await prepareImage(await fetchAttachment(i.options.getAttachment('image',true)))];mode='prestige';
+ }else if(kind==='single-fix'){
+  targetCode=relative(i.options.getString('code',true));
+  const card=await getCard(i.guildId,targetCode,false);
+  if(!card)err('Carte introuvable. Vérifie son code dans /cartes catalogue.');
+  name=`${card.title} (${targetCode})`;mode='single-fix';
+  images=[await prepareImage(await fetchAttachment(i.options.getAttachment('image',true)))];
  }else{
   name=i.options.getString('nom',true).trim();
   if(!validName(name))err('Nom du personnage invalide (2 à 50 caractères).');
   const key=normalize(name);if(!key)err('Choisis un nom contenant des lettres ou chiffres.');
-  const {rows}=await usePool().query('SELECT 1 FROM ldh_cards WHERE guild_id=$1 AND character_key=$2 AND tier<>$3 LIMIT 1',[i.guildId,key,'prestige']);
-  if(rows.length)err(`Ce personnage existe déjà : ${name}. L'import complet refuse d'écraser les cartes existantes.`);
-  if(kind==='planche')images=await cutPlanche(await fetchAttachment(i.options.getAttachment('planche',true)),i.options.getString('disposition',true));
-  else images=await Promise.all(BASE_TIERS.map(async tier=>prepareImage(await fetchAttachment(i.options.getAttachment(tier.key,true)))));
+  const {rows}=await usePool().query('SELECT tier FROM ldh_cards WHERE guild_id=$1 AND character_key=$2 AND tier<>$3',[i.guildId,key,'prestige']);
+  if(kind==='correction'){
+   const existing=new Set(rows.map(r=>r.tier));
+   if(rows.length!==5||BASE_TIERS.some(t=>!existing.has(t.key)))err('Ce personnage doit déjà posséder ses 5 cartes classiques pour les corriger. Sinon utilise /cartes importer-planche.');
+   mode='correction';
+  }else if(rows.length)err(`Ce personnage existe déjà : ${name}. Utilise /cartes corriger-planche pour remplacer ses images sans perdre ses collections.`);
+  if(kind==='planche'||kind==='correction'){
+   source=await fetchAttachment(i.options.getAttachment('planche',true));
+   const disposition=i.options.getString('disposition',true);
+   const info=await sheetInfo(source,disposition);boxes=info.boxes;
+   images=await cutPlanche(source,disposition,boxes);
+  }else images=await Promise.all(BASE_TIERS.map(async tier=>prepareImage(await fetchAttachment(i.options.getAttachment(tier.key,true)))));
  }
- const key=nano();imports.set(key,{guild:i.guildId,author:i.user.id,mode,name,images,created:Date.now()});
- const preview=await panel(images.map((image,j)=>({image,tier:mode==='prestige'?'prestige':BASE_TIERS[j].key,title:mode==='prestige'?name:`${name} · ${BASE_TIERS[j].label}`})),
-  {title:`Aperçu : ${name}`,subtitle:'Vérifie bien les images et leur ordre avant de confirmer.',columns:images.length});
- await i.editReply({content:`🖼️ **Aperçu de ${safe(name)}**\n${mode==='prestige'?'Album Prestige':'Ordre : Commune → Peu commune → Rare → Épique → Légendaire'}\n**Aucune carte n’est encore enregistrée.**`,files:[new AttachmentBuilder(preview,{name:'apercu-cartes.png'})],components:[rowButtons([{id:`ldh:import:ok:${key}`,label:'✅ Confirmer l’import',style:ButtonStyle.Success},{id:`ldh:import:no:${key}`,label:'Annuler',style:ButtonStyle.Danger}])]});
+ const token=nano();const p={guild:i.guildId,author:i.user.id,mode,name,images,source,boxes,targetCode,created:Date.now(),current:0,reviewed:new Set()};imports.set(token,p);
+ await i.editReply(previewPayload(p,token));
 }
 async function commitImport(i,action,token){
  if(!(await canManage(i.guildId,i.user.id)))err('Tu ne disposes plus des droits nécessaires pour confirmer cette importation.');
- const p=imports.get(token);if(!p||p.guild!==i.guildId||p.author!==i.user.id||Date.now()-p.created>600000)err('Aperçu expiré. Relance la commande pour ajouter tes cartes.');
- if(action==='no'){imports.delete(token);return i.update({content:'❎ Importation annulée. Aucune carte ajoutée.',components:[],attachments:[]});}
- await i.deferUpdate();
- let created;
- try{created=await transaction(async db=>{
+ const p=pendingImport(i,token);
+ if(action==='no'){imports.delete(token);return i.update({content:'❎ Importation annulée. Aucune carte modifiée.',components:[],attachments:[]});}
+ if(action!=='ok')err('Action d’importation inconnue.');
+ if(p.images.length===5&&p.reviewed.size!==5)err('Vérifie les cinq cartes individuellement avant de confirmer.');
+ if(p.inFlight)err('Cette importation est déjà en cours de confirmation.');
+ p.inFlight=true;
+ try{await i.deferUpdate();}catch(e){p.inFlight=false;throw e;}
+ let result;
+ try{result=await transaction(async db=>{
   await lock(db,i.guildId);
   const key=normalize(p.name);
+  if(p.mode==='single-fix'){
+   const updated=await db.query('UPDATE ldh_cards SET image=$1 WHERE guild_id=$2 AND code=$3 RETURNING code',[p.images[0],i.guildId,p.targetCode]);
+   if(updated.rowCount!==1)err('La carte n’existe plus. Aucune modification effectuée.');
+   return [`${p.targetCode} : image corrigée (numéro et collections inchangés)`];
+  }
+  if(p.mode==='correction'){
+   const checks=await db.query("SELECT id,tier,code FROM ldh_cards WHERE guild_id=$1 AND character_key=$2 AND tier<>'prestige' FOR UPDATE",[i.guildId,key]);
+   const found=new Set(checks.rows.map(c=>c.tier));
+   if(checks.rows.length!==5||BASE_TIERS.some(t=>!found.has(t.key)))err('Le catalogue a changé pendant l’aperçu. Aucune image remplacée.');
+   const updated=[];
+   for(let j=0;j<5;j++){
+    const tier=BASE_TIERS[j].key;
+    const change=await db.query('UPDATE ldh_cards SET image=$1 WHERE guild_id=$2 AND character_key=$3 AND tier=$4 RETURNING code',[p.images[j],i.guildId,key,tier]);
+    if(change.rowCount!==1)err('Correction incomplète : toutes les modifications ont été annulées.');
+    updated.push(`${change.rows[0].code} : ${humanTier(tier)}`);
+   }
+   return updated;
+  }
   if(p.mode==='classique'){
    const check=await db.query('SELECT 1 FROM ldh_cards WHERE guild_id=$1 AND character_key=$2 AND tier<>$3 LIMIT 1',[i.guildId,key,'prestige']);
    if(check.rowCount)err('Ce personnage a été ajouté entre-temps. Aucune image écrasée.');
   }
   const added=[];
-  for(let k=0;k<p.images.length;k++){
-   const tier=p.mode==='prestige'?'prestige':BASE_TIERS[k].key;
-   const title=p.mode==='prestige'?p.name:p.name;
-   const insert=await db.query('INSERT INTO ldh_cards(guild_id,character_key,character_name,title,tier,image) VALUES($1,$2,$3,$4,$5,$6) RETURNING id',[i.guildId,p.mode==='prestige'?'prestige':key,p.mode==='prestige'?'Album Prestige':p.name,title,tier,p.images[k]]);
+  for(let j=0;j<p.images.length;j++){
+   const tier=p.mode==='prestige'?'prestige':BASE_TIERS[j].key;
+   const insert=await db.query('INSERT INTO ldh_cards(guild_id,character_key,character_name,title,tier,image) VALUES($1,$2,$3,$4,$5,$6) RETURNING id',[i.guildId,p.mode==='prestige'?'prestige':key,p.mode==='prestige'?'Album Prestige':p.name,p.name,tier,p.images[j]]);
    const id=insert.rows[0].id;const code=formatCode(id,p.mode==='prestige');
    await db.query('UPDATE ldh_cards SET code=$1 WHERE id=$2',[code,id]);added.push(`${code} : ${humanTier(tier)}`);
   }
   return added;
- });imports.delete(token);}catch(e){throw e;}
- await i.editReply({content:`✅ **${safe(p.name)} ajouté${p.mode==='prestige'?'e':''} au catalogue !**\n${created.map(x=>'• '+x).join('\n')}\nLes cartes sont maintenant disponibles dans les boosters.`,components:[],attachments:[]});
+ });}catch(e){p.inFlight=false;throw e;}
+ imports.delete(token);
+ const correction=p.mode==='correction'||p.mode==='single-fix';
+ await i.editReply({content:`✅ **${safe(p.name)} : ${correction?'images corrigées':'cartes ajoutées'} !**\n${result.map(x=>'• '+x).join('\n')}\n${correction?'✅ Les mêmes numéros de cartes et toutes les collections ont été conservés.':'Les cartes sont disponibles dans les boosters.'}`,components:[],attachments:[]});
 }
 async function config(i,sub){
  if(!(await canManage(i.guildId,i.user.id)))err('Gestion des cartes réservée à Esty et aux administrateurs autorisés.');
@@ -335,9 +467,9 @@ async function cardCommand(i,sub){
  if(sub==='test-activer')return testActivate(i);
  if(sub==='test-recharger')return testRecharge(i);
  if(sub==='test-terminer')return prepareTestFinish(i);
- if(['ajouter-joueur','importer-planche','ajouter-prestige'].includes(sub))return stageImport(i,sub==='ajouter-joueur'?'individuel':sub==='importer-planche'?'planche':'prestige');
+ if(['ajouter-joueur','importer-planche','ajouter-prestige','corriger-planche','corriger-image'].includes(sub))return stageImport(i,({ 'ajouter-joueur':'individuel','importer-planche':'planche','ajouter-prestige':'prestige','corriger-planche':'correction','corriger-image':'single-fix' })[sub]);
  await i.deferReply({flags:EP});
- if(sub==='aide')return i.editReply('👑 **Accès admin :** `/cartes admin-ajouter membre:@Tropi`, `/cartes admin-retirer`, `/cartes admin-liste` (Esty uniquement).\n🧪 **Essais :** `/cartes test-activer partenaire:@Tropi`, `/cartes test-statut`, `/cartes test-recharger`, `/cartes test-terminer`. Le dernier efface UNIQUEMENT la progression des cartes après double confirmation.\n🎴 **Administration :** `/cartes ajouter-joueur`, `/cartes importer-planche`, `/cartes ajouter-prestige`, `/cartes configurer-salon`, `/cartes configurer-echanges`, `/cartes catalogue`, `/cartes voir`, `/cartes retirer`, `/cartes reactiver`, `/cartes donner`.\n**Joueurs :** `/booster ouvrir`, `/booster dernier`, `/collection`, `/echange proposer`, `/echange historique`, `/carte rechercher`, `/classement-cartes`.');
+ if(sub==='aide')return i.editReply('👑 **Accès admin :** `/cartes admin-ajouter membre:@Tropi`, `/cartes admin-retirer`, `/cartes admin-liste` (Esty uniquement).\n🧪 **Essais :** `/cartes test-activer partenaire:@Tropi`, `/cartes test-statut`, `/cartes test-recharger`, `/cartes test-terminer`. Le dernier efface UNIQUEMENT la progression des cartes après double confirmation.\n🎴 **Administration :** `/cartes ajouter-joueur`, `/cartes importer-planche`, `/cartes corriger-planche`, `/cartes corriger-image`, `/cartes ajouter-prestige`, `/cartes configurer-salon`, `/cartes configurer-echanges`, `/cartes catalogue`, `/cartes voir`, `/cartes retirer`, `/cartes reactiver`, `/cartes donner`.\n**Joueurs :** `/booster ouvrir`, `/booster dernier`, `/collection`, `/echange proposer`, `/echange historique`, `/carte rechercher`, `/classement-cartes`.');
  if(sub==='test-statut'){
   const st=await getMode(i.guildId);
   const label=st.mode==='test'?`🧪 Test privé : Esty et <@${st.partner}>`:st.mode==='public'?'🎉 Public : ouvert à tous':'🔒 Préparation : aucun booster encore accessible';
@@ -644,7 +776,10 @@ async function handle(i){
   // Les commandes /cartes restent réservées à leur contrôle interne (catalogue / lancement).
   const state=await getMode(i.guildId);
   const isCardsAdmin=i.isChatInputCommand()&&i.commandName==='cartes';
-  if(!isCardsAdmin&&!mayPlay(state,i.user.id)){
+  // Les validations / recadrages des imports doivent rester possibles même
+  // avant l'ouverture des boosters. Chaque aperçu contrôle déjà son auteur.
+  const isImportWorkflow=(i.isButton()||i.isModalSubmit()) && i.customId?.startsWith('ldh:import:');
+  if(!isCardsAdmin&&!isImportWorkflow&&!mayPlay(state,i.user.id)){
    const message=state.mode==='test'?'🧪 Les Drôles de Cartes sont en test privé avec Esty et Tropi. Le lancement officiel arrive !':'🔒 Les Drôles de Cartes ne sont pas encore ouvertes. Esty prépare le lancement !';
    return i.reply(privateText(message));
   }
@@ -657,13 +792,19 @@ async function handle(i){
    if(i.commandName==='classement-cartes')return await rank(i);
    return;
   }
+  if(i.isModalSubmit()&&i.customId.startsWith('ldh:import:crop:')){const a=i.customId.split(':');return await saveCropModal(i,a[3],Number(a[4]));}
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:test:submit:'))return await finishTest(i,i.customId.split(':')[3]);
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:offer:'))return await offerModal(i,i.customId.split(':')[2]);
   if(i.isButton()&&i.customId.startsWith('ldh:')){
    const [_,type,action,id,position]=i.customId.split(':');
    if(type==='booster'&&action==='zoom')return await zoomBoosterCard(i,id,position);
    if(type==='test'&&action==='finish')return await showResetModal(i,id);
-   if(type==='import')return await commitImport(i,action,id);
+   if(type==='import'){
+    if(action==='view')return await previewImport(i,id,Number(position));
+    if(action==='adjust')return await showCropModal(i,id);
+    if(action==='nudge')return await nudgeCrop(i,id,position);
+    return await commitImport(i,action,id);
+   }
    if(type==='share')return await shareBooster(i,action);
    if(type==='album')return await pageAlbum(i,action,id);
    if(type==='trade'){
