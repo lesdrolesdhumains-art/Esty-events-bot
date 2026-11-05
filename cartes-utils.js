@@ -1,12 +1,12 @@
 'use strict';
 const {randomInt}=require('node:crypto');
 const TIERS=[
- {key:'commune',label:'Commune',weight:448,color:'#929AA8'},
+ {key:'commune',label:'Commune',weight:445,color:'#929AA8'},
  {key:'peu_commune',label:'Peu commune',weight:300,color:'#29A96B'},
  {key:'rare',label:'Rare',weight:170,color:'#478FE2'},
  {key:'epique',label:'Épique',weight:70,color:'#A65BE0'},
  {key:'legendaire',label:'Légendaire',weight:10,color:'#E4B334'},
- {key:'prestige',label:'Légende des Légendaires',weight:2,color:'#E36B35'},
+ {key:'prestige',label:'Légende des Légendaires',weight:5,color:'#E36B35'},
 ];
 const BASE_TIERS=TIERS.filter(t=>t.key!=='prestige');
 function normalize(v){return String(v||'').trim().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');}

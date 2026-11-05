@@ -9,7 +9,7 @@ const {TIERS,BASE_TIERS,normalize,safe,dayParis,chooseTier,parseItems,formatCode
 const {prepareImage,cutPlanche,sheetInfo,cutOne,validateBox,panel}=require('./cartes-render');
 const EP=MessageFlags.Ephemeral;
 let pool=null,botClient=null;
-const imports=new Map(),albums=new Map(),testResets=new Map();
+const imports=new Map(),albums=new Map(),testResets=new Map(),fullResets=new Map(),catalogViews=new Map();
 const owner=id=>id===process.env.OWNER_ID;
 const validName=s=>typeof s==='string'&&s.trim().length>=2&&s.trim().length<=50;
 const relative=code=>code?.toUpperCase().trim();
@@ -19,6 +19,16 @@ const noMentions={allowedMentions:{parse:[]}};
 const privateText=content=>({content,flags:EP,...noMentions});
 const nano=()=>crypto.randomBytes(8).toString('hex');
 const maxFile=8*1024*1024;
+const BOOSTER_COOLDOWN_MS=12*60*60*1000;
+// Les Légendes des Légendaires sont tirées dans les boosters ordinaires, sans attribution quotidienne.
+function cooldownRemaining(openedAt,now=new Date()){
+ if(!openedAt)return 0;
+ return Math.max(0,BOOSTER_COOLDOWN_MS-(new Date(now).getTime()-new Date(openedAt).getTime()));
+}
+function nextAvailableText(openedAt){
+ const unix=Math.ceil((new Date(openedAt).getTime()+BOOSTER_COOLDOWN_MS)/1000);
+ return `Ton prochain booster sera disponible <t:${unix}:R> (à <t:${unix}:t>).`;
+}
 function err(c){throw Error(c);}
 function usePool(){if(!pool)err('Module cartes pas encore connecté à la base de données.');return pool;}
 function formatLine(item){return `${item.code} ×${item.qty}${item.title?` — ${safe(item.title)}`:''}`;}
@@ -54,8 +64,13 @@ admin.addSubcommand(s=>s.setName('ajouter-prestige').setDescription('Ajouter une
  .addStringOption(o=>o.setName('titre').setDescription('Titre de la carte spéciale').setMinLength(3).setMaxLength(100).setRequired(true))
  .addAttachmentOption(o=>o.setName('image').setDescription('Image de la carte Prestige').setRequired(true)));
 admin.addSubcommand(s=>s.setName('catalogue').setDescription('Consulter toutes les cartes et leur code')
- .addStringOption(o=>o.setName('personnage').setDescription('Filtrer par personnage (facultatif)').setMaxLength(50))
+ .addStringOption(o=>o.setName('personnage').setDescription('Filtrer par personnage ou titre').setMaxLength(50))
  .addIntegerOption(o=>o.setName('page').setDescription('Page').setMinValue(1)));
+admin.addSubcommand(s=>s.setName('liste-complete').setDescription('📚 Liste paginée de toutes les cartes avec leurs codes')
+ .addStringOption(o=>o.setName('recherche').setDescription('Nom, titre ou code (facultatif)').setMaxLength(80))
+ .addStringOption(o=>o.setName('filtre').setDescription('Toutes, classiques, Prestige ou désactivées')
+  .addChoices({name:'Toutes les cartes',value:'toutes'},{name:'Collection classique',value:'classique'},{name:'Album Prestige',value:'prestige'},{name:'Cartes retirées des tirages',value:'inactives'}))
+ .addIntegerOption(o=>o.setName('page').setDescription('Numéro de page').setMinValue(1)));
 admin.addSubcommand(s=>s.setName('voir').setDescription('Afficher une carte officielle en image')
  .addStringOption(o=>o.setName('code').setDescription('Ex. C-00001').setRequired(true)));
 admin.addSubcommand(s=>s.setName('retirer').setDescription('Désactiver un tirage, sans détruire les collections')
@@ -69,9 +84,10 @@ admin.addSubcommand(s=>s.setName('donner').setDescription('Donner une carte à u
 admin.addSubcommand(s=>s.setName('statut').setDescription('État du catalogue et des salons'));
 admin.addSubcommand(s=>s.setName('test-activer').setDescription('Activer le mode test exclusivement pour toi et un membre')
  .addUserOption(o=>o.setName('partenaire').setDescription('Choisis Tropi pour les essais').setRequired(true)));
-admin.addSubcommand(s=>s.setName('test-recharger').setDescription('Autoriser un nouveau booster test sans attendre minuit')
+admin.addSubcommand(s=>s.setName('test-recharger').setDescription('Autoriser un nouveau booster test sans attendre 12 h')
  .addUserOption(o=>o.setName('membre').setDescription('Esty ou le partenaire de test (par défaut : toi)')));
 admin.addSubcommand(s=>s.setName('test-terminer').setDescription('Effacer TOUS les progrès test et ouvrir le jeu au serveur'));
+admin.addSubcommand(s=>s.setName('reset-total').setDescription('⚠️ Réinitialiser toutes les progressions, même après lancement (Esty uniquement)'));
 admin.addSubcommand(s=>s.setName('test-statut').setDescription('Voir si le jeu est verrouillé, en test ou public'));
 admin.addSubcommand(s=>s.setName('admin-ajouter').setDescription('Autoriser un membre à gérer les cartes')
  .addUserOption(o=>o.setName('membre').setDescription('Personne à autoriser, par exemple Tropi').setRequired(true)));
@@ -80,9 +96,9 @@ admin.addSubcommand(s=>s.setName('admin-retirer').setDescription('Retirer le dro
 admin.addSubcommand(s=>s.setName('admin-liste').setDescription('Voir les administrateurs des cartes'));
 admin.addSubcommand(s=>s.setName('aide').setDescription('Résumé des commandes'));
 const booster=base(new SlashCommandBuilder().setName('booster').setDescription('🎁 Booster individuel de 5 cartes'))
- .addSubcommand(s=>s.setName('ouvrir').setDescription('Ouvrir le booster du jour, en privé'))
+ .addSubcommand(s=>s.setName('ouvrir').setDescription('Ouvrir 5 cartes en privé, toutes les 12 heures'))
  .addSubcommand(s=>s.setName('dernier').setDescription('Revoir ses cartes du dernier booster'))
- .addSubcommand(s=>s.setName('statut').setDescription('Savoir si le booster du jour est disponible'));
+ .addSubcommand(s=>s.setName('statut').setDescription('Voir le délai avant le prochain booster (12 h)'));
 const collection=base(new SlashCommandBuilder().setName('collection').setDescription('📚 Consulter un album public (réponse privée)'))
  .addUserOption(o=>o.setName('joueur').setDescription('Album d’un autre joueur'))
  .addStringOption(o=>o.setName('album').setDescription('Classique ou Prestige').addChoices({name:'Classique',value:'classique'},{name:'Prestige',value:'prestige'}))
@@ -119,17 +135,34 @@ async function init(db,client){pool=db;botClient=client;await usePool().query(`
  CREATE INDEX IF NOT EXISTS ldh_inventory_user_idx ON ldh_inventory(guild_id,user_id);
  CREATE TABLE IF NOT EXISTS ldh_boosters(
  id BIGSERIAL PRIMARY KEY,guild_id TEXT NOT NULL,user_id TEXT NOT NULL,paris_day TEXT NOT NULL,
- card_ids JSONB NOT NULL,opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),shared_at TIMESTAMPTZ,
- UNIQUE(guild_id,user_id,paris_day));
+ card_ids JSONB NOT NULL,opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),shared_at TIMESTAMPTZ
+ );
+ CREATE INDEX IF NOT EXISTS ldh_boosters_user_idx ON ldh_boosters(guild_id,user_id,opened_at DESC);
+ CREATE TABLE IF NOT EXISTS ldh_test_recharges(
+ guild_id TEXT NOT NULL,user_id TEXT NOT NULL,credits INTEGER NOT NULL DEFAULT 0 CHECK(credits>=0),
+ PRIMARY KEY(guild_id,user_id));
+ CREATE TABLE IF NOT EXISTS ldh_prestige_draws(
+ guild_id TEXT NOT NULL,paris_day TEXT NOT NULL,winner_user TEXT NOT NULL,
+ card_id BIGINT NOT NULL REFERENCES ldh_cards(id),
+ awarded_at TIMESTAMPTZ NOT NULL DEFAULT now(),announced_at TIMESTAMPTZ,
+ PRIMARY KEY(guild_id,paris_day));
  CREATE TABLE IF NOT EXISTS ldh_trades(
  id BIGSERIAL PRIMARY KEY,guild_id TEXT NOT NULL,from_user TEXT NOT NULL,to_user TEXT NOT NULL,
  offer JSONB NOT NULL,request JSONB NOT NULL,status TEXT NOT NULL DEFAULT 'draft',
  channel_id TEXT,message_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  expires_at TIMESTAMPTZ NOT NULL DEFAULT (now()+interval '24 hours'),closed_at TIMESTAMPTZ);
  CREATE INDEX IF NOT EXISTS ldh_trades_guild_idx ON ldh_trades(guild_id,status);
+ CREATE TABLE IF NOT EXISTS ldh_reset_backups(
+  id BIGSERIAL PRIMARY KEY,guild_id TEXT NOT NULL,created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),snapshot JSONB NOT NULL);
+ CREATE INDEX IF NOT EXISTS ldh_reset_backups_guild_idx ON ldh_reset_backups(guild_id,created_at);
  ALTER TABLE ldh_config ADD COLUMN IF NOT EXISTS game_mode TEXT NOT NULL DEFAULT 'preparation';
  ALTER TABLE ldh_config ADD COLUMN IF NOT EXISTS test_partner TEXT;
- `);console.log('✅ Les Drôles de Cartes : tables prêtes.');}
+ ALTER TABLE ldh_boosters DROP CONSTRAINT IF EXISTS ldh_boosters_guild_id_user_id_paris_day_key;
+ `);
+ // Ancienne règle UN par jour retirée à l'initialisation, sans effacer les tirages existants.
+ // Les éventuels anciens tirages serveur sont conservés en base pour permettre un reset historique.
+ console.log('✅ Les Drôles de Cartes : tables prêtes (12 h et Prestige 0,5 % dans les boosters).');}
 async function canManage(guild,user){
  if(owner(user))return true;
  const {rows}=await usePool().query('SELECT 1 FROM ldh_card_admins WHERE guild_id=$1 AND user_id=$2',[guild,user]);
@@ -189,7 +222,7 @@ async function testActivate(i){
  });
  await i.editReply(`🧪 **MODE TEST ACTIVÉ** pour <@${i.user.id}> et <@${partner.id}> uniquement.
 Les autres membres ne peuvent pas ouvrir de booster, consulter les albums ou échanger.
-🎴 Ajoute tes cartes, puis teste \`/booster ouvrir\`. \`/cartes test-recharger\` permet de refaire un tirage sans attendre minuit.
+🎴 Ajoute tes cartes, puis teste \`/booster ouvrir\`. \`/cartes test-recharger\` permet de refaire un tirage sans attendre 12 h.
 ⚠️ Quand tout sera prêt, \`/cartes test-terminer\` effacera les PROGRÈS du test, mais conservera toutes les images et les salons.`);
 }
 async function testRecharge(i){
@@ -201,11 +234,12 @@ async function testRecharge(i){
   const mode=await getMode(i.guildId,db);
   if(mode.mode!=='test')err('Cette commande fonctionne uniquement pendant le mode test.');
   if(u.id!==i.user.id&&u.id!==mode.partner)err('Seuls Esty et le partenaire de test peuvent recevoir une recharge.');
-  const r=await db.query('DELETE FROM ldh_boosters WHERE guild_id=$1 AND user_id=$2 AND paris_day=$3 RETURNING id',[i.guildId,u.id,dayParis()]);
-  return r.rowCount;
+  const r=await db.query(`INSERT INTO ldh_test_recharges(guild_id,user_id,credits) VALUES($1,$2,1)
+   ON CONFLICT(guild_id,user_id) DO UPDATE SET credits=ldh_test_recharges.credits+1 RETURNING credits`,[i.guildId,u.id]);
+  return r.rows[0].credits;
  });
- await i.editReply(`🧪 **${safe(u.username)}** peut ouvrir un nouveau booster aujourd’hui. ${n?'Son dernier booster du jour a été déverrouillé.':'Aucune ouverture du jour à supprimer.'}
-Les cartes déjà obtenues restent dans sa collection TEST, qui sera entièrement vidée au lancement officiel.`);
+ await i.editReply(`🧪 **${safe(u.username)}** reçoit 1 recharge de booster (crédits disponibles : ${n}).
+Son historique et ses cartes de test sont conservés. Le quota de 12 h sera ignoré pour ce crédit, uniquement en mode test.`);
 }
 async function prepareTestFinish(i){
  if(!owner(i.user.id))err('Seule Esty peut lancer la remise à zéro.');
@@ -215,7 +249,7 @@ async function prepareTestFinish(i){
  const token=nano();testResets.set(token,{guild:i.guildId,owner:i.user.id,created:Date.now()});
  await i.editReply({content:`⚠️ **FIN DU MODE TEST — REMISE À ZÉRO IRRÉVERSIBLE**
 
-Seront supprimés pour **Les Drôles de Cartes seulement** : **toutes les collections et leurs découvertes, tous les boosters (y compris le quota quotidien), toutes les propositions et tous les historiques d’échange** de ce serveur.
+Seront supprimés pour **Les Drôles de Cartes seulement** : **toutes les collections et leurs découvertes, tous les boosters et leurs délais de 12 h, toutes les propositions et tous les historiques d’échange** de ce serveur.
 
 ✅ Seront **conservés** : les cartes, les images Esty/Tropi et autres personnages, les cartes Prestige, les salons configurés et les autres jeux.
 
@@ -241,6 +275,8 @@ async function finishTest(i,token){
   const mode=await getMode(i.guildId,db);
   if(mode.mode!=='test')err('Le mode test est déjà terminé : remise à zéro refusée.');
   const trades=await db.query('DELETE FROM ldh_trades WHERE guild_id=$1 RETURNING id',[i.guildId]);
+  await db.query('DELETE FROM ldh_prestige_draws WHERE guild_id=$1',[i.guildId]);
+  await db.query('DELETE FROM ldh_test_recharges WHERE guild_id=$1',[i.guildId]);
   const boosters=await db.query('DELETE FROM ldh_boosters WHERE guild_id=$1 RETURNING id',[i.guildId]);
   const inv=await db.query('DELETE FROM ldh_inventory WHERE guild_id=$1 RETURNING card_id',[i.guildId]);
   await db.query(`UPDATE ldh_config SET game_mode='public',test_partner=NULL WHERE guild_id=$1`,[i.guildId]);
@@ -250,8 +286,116 @@ async function finishTest(i,token){
  await i.editReply(`🎉 **LES DRÔLES DE CARTES SONT OUVERTES OFFICIELLEMENT !**
 Collections réinitialisées (${counts.inv} lignes), boosters remis à zéro (${counts.boosters}), échanges de test effacés (${counts.trades}).
 ✅ **Toutes les cartes et images importées sont intactes**, comme la configuration des salons et les autres jeux.
-🎁 Chaque membre, y compris toi et Tropi, peut désormais ouvrir son booster du jour.`);
+🎁 Chaque membre, y compris toi et Tropi, peut désormais ouvrir un booster de 5 cartes toutes les 12 h. Les Légendes des Légendaires sont tirables à 0,5 % par carte.`);
 }
+
+// Remise à zéro permanente : le propriétaire confirme deux fois ; sauvegarde Neon et suppression atomique.
+async function prepareFullReset(i){
+ if(!owner(i.user.id))err('Seule Esty (OWNER_ID) peut lancer /cartes reset-total.');
+ await i.deferReply({flags:EP});
+ const {rows}=await usePool().query(`SELECT
+ (SELECT COUNT(*)::int FROM ldh_inventory WHERE guild_id=$1) AS collections,
+ (SELECT COUNT(*)::int FROM ldh_boosters WHERE guild_id=$1) AS boosters,
+ (SELECT COUNT(*)::int FROM ldh_trades WHERE guild_id=$1) AS echanges`,[i.guildId]);
+ const c=rows[0]||{};
+ const token=nano();fullResets.set(token,{guild:i.guildId,owner:i.user.id,created:Date.now()});
+ await i.editReply({content:`🚨 **RESET TOTAL DES DRÔLES DE CARTES — ATTENTION**
+
+Tu vas vider **tous les inventaires des joueurs**, les découvertes, les ouvertures et délais de 12 h, ainsi que les échanges et leur historique, **même après le lancement officiel**.
+
+📊 Actuellement : **${Number(c.collections)||0}** lignes d'inventaire, **${Number(c.boosters)||0}** boosters et **${Number(c.echanges)||0}** échanges.
+
+✅ On conserve **toutes les cartes et illustrations**, l'album Prestige, les codes officiels, les salons, les administrateurs (dont Tropi), le mode public/test et les autres jeux.
+
+🛟 Une **sauvegarde des données supprimées sera créée dans Neon**, dans \`ldh_reset_backups\`, avant suppression. Aucune image n'est copiée car elles restent intactes. Les messages déjà publiés sur Discord resteront visibles.
+
+**L'opération est irréversible depuis Discord.** Seul un administrateur de la base pourra restaurer la sauvegarde. Bouton valable 5 minutes.`,
+ components:[rowButtons([{id:`ldh:reset:confirm:${token}`,label:'⚠️ Je veux réinitialiser les progressions',style:ButtonStyle.Danger}])]});
+}
+async function showFullResetModal(i,token){
+ const r=fullResets.get(token);
+ if(!owner(i.user.id)||!r||r.guild!==i.guildId||r.owner!==i.user.id||Date.now()-r.created>300000)err('Confirmation expirée ou non autorisée. Relance /cartes reset-total.');
+ const modal=new ModalBuilder().setCustomId(`ldh:reset:submit:${token}`).setTitle('Dernière confirmation — Reset total');
+ modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder()
+  .setCustomId('phrase').setLabel('Recopie : RESET TOTAL CARTES')
+  .setStyle(TextInputStyle.Short).setRequired(true).setMinLength(18).setMaxLength(30)));
+ await i.showModal(modal);
+}
+async function runFullReset(i,token){
+ const r=fullResets.get(token);
+ if(!owner(i.user.id)||!r||r.guild!==i.guildId||r.owner!==i.user.id||Date.now()-r.created>300000)err('Confirmation expirée ou non autorisée. Rien n’a été supprimé.');
+ if(i.fields.getTextInputValue('phrase').trim()!=='RESET TOTAL CARTES')err('Phrase incorrecte : aucune donnée supprimée. Il faut écrire RESET TOTAL CARTES.');
+ await i.deferReply({flags:EP});
+ const result=await transaction(async db=>{
+  await lock(db,i.guildId);
+  // La copie et les DELETE sont dans la même transaction. Si la sauvegarde échoue, rien n'est supprimé.
+  const saved=await db.query(`INSERT INTO ldh_reset_backups(guild_id,created_by,snapshot)
+   SELECT $1,$2,jsonb_build_object(
+    'inventory',(SELECT COALESCE(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM ldh_inventory x WHERE x.guild_id=$1),
+    'boosters',(SELECT COALESCE(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM ldh_boosters x WHERE x.guild_id=$1),
+    'trades',(SELECT COALESCE(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM ldh_trades x WHERE x.guild_id=$1),
+    'prestige_draws',(SELECT COALESCE(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM ldh_prestige_draws x WHERE x.guild_id=$1),
+    'test_recharges',(SELECT COALESCE(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM ldh_test_recharges x WHERE x.guild_id=$1)
+   ) RETURNING id`,[i.guildId,i.user.id]);
+  if(saved.rowCount!==1)err('Sauvegarde non créée : reset annulé.');
+  await db.query('DELETE FROM ldh_prestige_draws WHERE guild_id=$1');
+  await db.query('DELETE FROM ldh_test_recharges WHERE guild_id=$1');
+  const trades=await db.query('DELETE FROM ldh_trades WHERE guild_id=$1 RETURNING id',[i.guildId]);
+  const boosters=await db.query('DELETE FROM ldh_boosters WHERE guild_id=$1 RETURNING id',[i.guildId]);
+  const inv=await db.query('DELETE FROM ldh_inventory WHERE guild_id=$1 RETURNING card_id',[i.guildId]);
+  return {backup:saved.rows[0].id,trades:trades.rowCount,boosters:boosters.rowCount,inv:inv.rowCount};
+ });
+ fullResets.delete(token);albums.clear();
+ await i.editReply(`✅ **RESET TOTAL TERMINÉ** — toutes les progressions des Drôles de Cartes ont été réinitialisées.
+🎴 Inventaires : ${result.inv} lignes · 🎁 Boosters : ${result.boosters} · 🤝 Échanges : ${result.trades}.
+🛟 Sauvegarde Neon n° **${result.backup}** dans \`ldh_reset_backups\`.
+👑 **Toutes les images, les codes, le catalogue, l'album Prestige, les accès Tropi, les salons et les autres jeux sont conservés.**
+Le jeu reste dans son mode précédent, même s'il était déjà public. Chaque joueur peut repartir de zéro.`);
+}
+
+// Catalogue complet : 12 cartes par page, codes officiels, filtres et navigation privée.
+function cleanupCatalogViews(){for(const [id,entry] of catalogViews)if(Date.now()-entry.created>900000)catalogViews.delete(id);}
+async function renderCatalog(guild,search,filtre,page,token){
+ const like=`%${search}%`;
+ const where=`guild_id=$1 AND ($2='' OR code ILIKE $4 OR character_name ILIKE $4 OR title ILIKE $4) AND
+   ($3='toutes' OR ($3='classique' AND tier<>'prestige') OR ($3='prestige' AND tier='prestige') OR ($3='inactives' AND active=false))`;
+ const params=[guild,search,filtre,like];
+ const count=await usePool().query(`SELECT COUNT(*)::int AS total FROM ldh_cards WHERE ${where}`,params);
+ const total=Number(count.rows[0]?.total||0),pages=Math.max(1,Math.ceil(total/12)),current=Math.max(1,Math.min(page,pages));
+ const {rows}=await usePool().query(`SELECT code,character_name,title,tier,active FROM ldh_cards WHERE ${where}
+ ORDER BY CASE WHEN tier='prestige' THEN 1 ELSE 0 END,character_name, id LIMIT 12 OFFSET $5`,[...params,(current-1)*12]);
+ const entries=rows.map(c=>`${c.active?'✅':'🚫'} **${c.code}** · ${decorateTitle(c.tier)} · ${safe(c.title).slice(0,52)}${c.character_name&&c.tier!=='prestige'?` (${safe(c.character_name).slice(0,24)})`:''}`);
+ const summary=`📚 **CATALOGUE COMPLET — ${total} carte${total===1?'':'s'}**
+`+
+   `🔎 Filtre : **${{toutes:'Toutes',classique:'Classiques',prestige:'Prestige',inactives:'Inactives'}[filtre]}**${search?` · Recherche : **${safe(search).slice(0,80)}**`:''}
+`+
+   `📄 Page **${current}/${pages}** · ✅ Disponible au tirage / 🚫 Retirée
+
+`+
+   (entries.join('\n')||'Aucune carte correspondante.')+
+   (rows.length?`\n\n💡 Pour afficher une carte : \`/cartes voir code:${rows[0].code}\`.`:'');
+ const buttons=rowButtons([
+  {id:`ldh:catalog:page:${token}:1`,label:'⏮ Début',disabled:current===1},
+  {id:`ldh:catalog:page:${token}:${current-1}`,label:'◀ Précédent',disabled:current===1},
+  {id:`ldh:catalog:page:${token}:${current+1}`,label:'Suivant ▶',disabled:current===pages},
+  {id:`ldh:catalog:page:${token}:${pages}`,label:'Fin ⏭',disabled:current===pages}
+ ]);
+ return {content:summary,components:[buttons],...noMentions};
+}
+async function startCatalog(i,sub){
+ await i.deferReply({flags:EP});cleanupCatalogViews();
+ const search=String((sub==='catalogue'?i.options.getString('personnage'):i.options.getString('recherche'))||'').trim();
+ const filter=sub==='catalogue'?'toutes':i.options.getString('filtre')||'toutes';
+ const page=Math.max(1,Math.min(i.options.getInteger('page')||1,100000));
+ const token=nano();catalogViews.set(token,{guild:i.guildId,user:i.user.id,search,filter,created:Date.now()});
+ await i.editReply(await renderCatalog(i.guildId,search,filter,page,token));
+}
+async function pageCatalog(i,token,page){
+ cleanupCatalogViews();const p=catalogViews.get(token);
+ if(!p||p.guild!==i.guildId||p.user!==i.user.id)err('Ce catalogue n’est plus disponible ou ne t’appartient pas. Utilise /cartes liste-complete.');
+ await i.deferUpdate();await i.editReply(await renderCatalog(i.guildId,p.search,p.filter,page,token));
+}
+
 async function getCard(guild,code,withImage=false,db=usePool()){ 
  const {rows}=await db.query(`SELECT id,code,character_key,character_name,title,tier,active${withImage?',image':''} FROM ldh_cards WHERE guild_id=$1 AND code=$2`,[guild,relative(code)]);
  return rows[0];
@@ -451,7 +595,7 @@ async function commitImport(i,action,token){
  });}catch(e){p.inFlight=false;throw e;}
  imports.delete(token);
  const correction=p.mode==='correction'||p.mode==='single-fix';
- await i.editReply({content:`✅ **${safe(p.name)} : ${correction?'images corrigées':'cartes ajoutées'} !**\n${result.map(x=>'• '+x).join('\n')}\n${correction?'✅ Les mêmes numéros de cartes et toutes les collections ont été conservés.':'Les cartes sont disponibles dans les boosters.'}`,components:[],attachments:[]});
+ await i.editReply({content:`✅ **${safe(p.name)} : ${correction?'images corrigées':'cartes ajoutées'} !**\n${result.map(x=>'• '+x).join('\n')}\n${correction?'✅ Les mêmes numéros de cartes et toutes les collections ont été conservés.':'Les cartes sont disponibles selon leur mode de tirage (classique ou Prestige).'}`,components:[],attachments:[]});
 }
 async function config(i,sub){
  if(!(await canManage(i.guildId,i.user.id)))err('Gestion des cartes réservée à Esty et aux administrateurs autorisés.');
@@ -467,13 +611,15 @@ async function cardCommand(i,sub){
  if(sub==='test-activer')return testActivate(i);
  if(sub==='test-recharger')return testRecharge(i);
  if(sub==='test-terminer')return prepareTestFinish(i);
+ if(sub==='reset-total')return prepareFullReset(i);
+ if(sub==='catalogue'||sub==='liste-complete')return startCatalog(i,sub);
  if(['ajouter-joueur','importer-planche','ajouter-prestige','corriger-planche','corriger-image'].includes(sub))return stageImport(i,({ 'ajouter-joueur':'individuel','importer-planche':'planche','ajouter-prestige':'prestige','corriger-planche':'correction','corriger-image':'single-fix' })[sub]);
  await i.deferReply({flags:EP});
- if(sub==='aide')return i.editReply('👑 **Accès admin :** `/cartes admin-ajouter membre:@Tropi`, `/cartes admin-retirer`, `/cartes admin-liste` (Esty uniquement).\n🧪 **Essais :** `/cartes test-activer partenaire:@Tropi`, `/cartes test-statut`, `/cartes test-recharger`, `/cartes test-terminer`. Le dernier efface UNIQUEMENT la progression des cartes après double confirmation.\n🎴 **Administration :** `/cartes ajouter-joueur`, `/cartes importer-planche`, `/cartes corriger-planche`, `/cartes corriger-image`, `/cartes ajouter-prestige`, `/cartes configurer-salon`, `/cartes configurer-echanges`, `/cartes catalogue`, `/cartes voir`, `/cartes retirer`, `/cartes reactiver`, `/cartes donner`.\n**Joueurs :** `/booster ouvrir`, `/booster dernier`, `/collection`, `/echange proposer`, `/echange historique`, `/carte rechercher`, `/classement-cartes`.');
+ if(sub==='aide')return i.editReply('🎁 **Booster :** 5 cartes toutes les 12 h, ouverture privée, zoom et partage au choix. 👑 Les cartes **Légende des Légendaires** sont dans les mêmes boosters avec **0,5 % de chance par carte** (si cette rareté est présente dans le catalogue actif). Aucun tirage Prestige séparé.\n👑 **Accès admin :** `/cartes admin-ajouter membre:@Tropi`, `/cartes admin-retirer`, `/cartes admin-liste` (Esty uniquement).\n🧪 **Essais :** `/cartes test-activer partenaire:@Tropi`, `/cartes test-statut`, `/cartes test-recharger`, `/cartes test-terminer`. Le dernier efface UNIQUEMENT la progression des cartes après double confirmation. **Reset permanent Esty :** `/cartes reset-total` (avec sauvegarde Neon et double confirmation).\n🎴 **Administration :** `/cartes ajouter-joueur`, `/cartes importer-planche`, `/cartes corriger-planche`, `/cartes corriger-image`, `/cartes ajouter-prestige`, `/cartes configurer-salon`, `/cartes configurer-echanges`, `/cartes catalogue`, `/cartes liste-complete`, `/cartes voir`, `/cartes retirer`, `/cartes reactiver`, `/cartes donner`.\n**Joueurs :** `/booster ouvrir`, `/booster dernier`, `/booster statut`, `/collection`, `/echange proposer`, `/echange historique`, `/carte rechercher`, `/classement-cartes`.');
  if(sub==='test-statut'){
   const st=await getMode(i.guildId);
   const label=st.mode==='test'?`🧪 Test privé : Esty et <@${st.partner}>`:st.mode==='public'?'🎉 Public : ouvert à tous':'🔒 Préparation : aucun booster encore accessible';
-  return i.editReply(`🎴 **Mode actuel :** ${label}\n🛡️ La remise à zéro n’est disponible qu’en mode test, et uniquement pour Esty.`);
+  return i.editReply(`🎴 **Mode actuel :** ${label}\n🛡️ Le reset de test lance le jeu public ; **/cartes reset-total** permet à Esty de vider les progressions à tout moment sans changer le mode.`);
  }
  if(sub==='statut'){
   const a=await usePool().query('SELECT tier,count(*)::int AS n FROM ldh_cards WHERE guild_id=$1 AND active=true GROUP BY tier',[i.guildId]);
@@ -481,11 +627,6 @@ async function cardCommand(i,sub){
   const s=Object.fromEntries(a.rows.map(x=>[x.tier,x.n]));
   const currentMode=await getMode(i.guildId);
   return i.editReply(`🎴 **Catalogue actuel : ${Object.values(s).reduce((x,y)=>x+y,0)} cartes actives**\n🔐 Mode : **${currentMode.mode}**\n${TIERS.map(t=>`${t.label} : **${s[t.key]||0}**`).join('\n')}\n📣 Partage : ${b.rows[0]?.share_channel?`<#${b.rows[0].share_channel}>`:'non configuré'}\n🤝 Échanges : ${b.rows[0]?.trade_channel?`<#${b.rows[0].trade_channel}>`:'salon de la commande'}`);
- }
- if(sub==='catalogue'){
-  const p=i.options.getInteger('page')||1;const character=normalize(i.options.getString('personnage')||'');
-  const {rows}=await usePool().query('SELECT code,character_name,title,tier,active FROM ldh_cards WHERE guild_id=$1 AND ($2=$3 OR character_key=$2) ORDER BY id LIMIT 25 OFFSET $4',[i.guildId,character,'',(p-1)*25]);
-  return i.editReply(`📖 **Catalogue — page ${p}**\n${rows.map(c=>`${c.active?'✅':'🚫'} **${c.code}** · ${safe(c.title)} · ${decorateTitle(c.tier)}`).join('\n')||'Aucune carte sur cette page.'}`);
  }
  if(sub==='voir'){
   const card=await getCard(i.guildId,i.options.getString('code',true),true);
@@ -512,12 +653,19 @@ async function claimBooster(guild,user){
  const date=dayParis();
  return transaction(async db=>{
   await lock(db,guild);
-  const prev=await db.query('SELECT id FROM ldh_boosters WHERE guild_id=$1 AND user_id=$2 AND paris_day=$3',[guild,user,date]);
-  if(prev.rowCount)err('Tu as déjà ouvert ton booster aujourd’hui ! Il sera à nouveau disponible à minuit (heure de Paris). Utilise /booster dernier.');
-  const {rows}=await db.query('SELECT id,tier FROM ldh_cards WHERE guild_id=$1 AND active=true',[guild]);
+  const prev=await db.query('SELECT opened_at FROM ldh_boosters WHERE guild_id=$1 AND user_id=$2 ORDER BY opened_at DESC,id DESC LIMIT 1',[guild,user]);
+  const remaining=cooldownRemaining(prev.rows[0]?.opened_at);
+  if(remaining){
+   const st=await getMode(guild,db);
+   const credit=st.mode==='test' ? await db.query('SELECT credits FROM ldh_test_recharges WHERE guild_id=$1 AND user_id=$2 FOR UPDATE',[guild,user]) : {rows:[]};
+   if(!Number(credit.rows[0]?.credits))err(`⏳ Tu as déjà ouvert un booster récemment. ${nextAvailableText(prev.rows[0].opened_at)} (12 h entre deux boosters).`);
+   await db.query('UPDATE ldh_test_recharges SET credits=credits-1 WHERE guild_id=$1 AND user_id=$2',[guild,user]);
+  }
+  // Les six raretés, Prestige inclus, participent au même tirage pondéré.
+  const {rows}=await db.query("SELECT id,tier FROM ldh_cards WHERE guild_id=$1 AND active=true",[guild]);
   const by={};for(const c of rows)(by[c.tier]??=[]).push(c.id);
   const picks=[];
-  for(let i=0;i<5;i++){const tier=chooseTier(by);const cards=by[tier];picks.push(cards[crypto.randomInt(cards.length)]);}
+  for(let k=0;k<5;k++){const tier=chooseTier(by);const cards=by[tier];picks.push(cards[crypto.randomInt(cards.length)]);}
   const {rows:created}=await db.query('INSERT INTO ldh_boosters(guild_id,user_id,paris_day,card_ids) VALUES($1,$2,$3,$4::jsonb) RETURNING id',[guild,user,date,JSON.stringify(picks)]);
   for(const id of picks)await addInventory(db,guild,user,id,1);
   return {id:created[0].id,ids:picks,shared:false,date};
@@ -541,8 +689,15 @@ async function boosterReply(i,boost,newly){
 async function handleBooster(i){
  const sub=i.options.getSubcommand();await i.deferReply({flags:EP});
  if(sub==='statut'){
-  const {rows}=await usePool().query('SELECT opened_at FROM ldh_boosters WHERE guild_id=$1 AND user_id=$2 AND paris_day=$3',[i.guildId,i.user.id,dayParis()]);
-  return i.editReply(rows.length?'⏳ Ton booster du jour est déjà ouvert. Reviens à minuit (heure de Paris).':'✅ Ton booster de 5 cartes est disponible ! Utilise `/booster ouvrir`.');
+  const {rows}=await usePool().query('SELECT opened_at FROM ldh_boosters WHERE guild_id=$1 AND user_id=$2 ORDER BY opened_at DESC,id DESC LIMIT 1',[i.guildId,i.user.id]);
+  const remaining=cooldownRemaining(rows[0]?.opened_at);
+  const mode=await getMode(i.guildId);
+  let credits=0;
+  if(mode.mode==='test'){
+   const q=await usePool().query('SELECT credits FROM ldh_test_recharges WHERE guild_id=$1 AND user_id=$2',[i.guildId,i.user.id]);
+   credits=Number(q.rows[0]?.credits||0);
+  }
+  return i.editReply(!remaining||credits?'✅ Ton booster de **5 cartes (Prestige inclus)** est disponible ! Utilise `/booster ouvrir`.'+ (credits?` 🧪 Crédits de test : ${credits}`:''):`⏳ ${nextAvailableText(rows[0].opened_at)} Un booster toutes les **12 heures**.`);
  }
  return boosterReply(i,sub==='ouvrir'?await claimBooster(i.guildId,i.user.id):await lastBooster(i.guildId,i.user.id),sub==='ouvrir');
 }
@@ -594,6 +749,7 @@ async function zoomBoosterCard(i,boosterId,position){
   ...noMentions
  });
 }
+
 async function collectData(guild,user,album,person,pg){
  const key=normalize(person||'');
  const {rows:catalog}=await usePool().query(`SELECT id,code,character_name,character_key,title,tier,image FROM ldh_cards
@@ -779,7 +935,9 @@ async function handle(i){
   // Les validations / recadrages des imports doivent rester possibles même
   // avant l'ouverture des boosters. Chaque aperçu contrôle déjà son auteur.
   const isImportWorkflow=(i.isButton()||i.isModalSubmit()) && i.customId?.startsWith('ldh:import:');
-  if(!isCardsAdmin&&!isImportWorkflow&&!mayPlay(state,i.user.id)){
+  const isOwnerResetWorkflow=(i.isButton()||i.isModalSubmit()) && i.customId?.startsWith('ldh:reset:');
+  const isCatalogWorkflow=i.isButton()&&i.customId?.startsWith('ldh:catalog:');
+  if(!isCardsAdmin&&!isImportWorkflow&&!isOwnerResetWorkflow&&!isCatalogWorkflow&&!mayPlay(state,i.user.id)){
    const message=state.mode==='test'?'🧪 Les Drôles de Cartes sont en test privé avec Esty et Tropi. Le lancement officiel arrive !':'🔒 Les Drôles de Cartes ne sont pas encore ouvertes. Esty prépare le lancement !';
    return i.reply(privateText(message));
   }
@@ -794,11 +952,14 @@ async function handle(i){
   }
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:import:crop:')){const a=i.customId.split(':');return await saveCropModal(i,a[3],Number(a[4]));}
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:test:submit:'))return await finishTest(i,i.customId.split(':')[3]);
+  if(i.isModalSubmit()&&i.customId.startsWith('ldh:reset:submit:'))return await runFullReset(i,i.customId.split(':')[3]);
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:offer:'))return await offerModal(i,i.customId.split(':')[2]);
   if(i.isButton()&&i.customId.startsWith('ldh:')){
    const [_,type,action,id,position]=i.customId.split(':');
    if(type==='booster'&&action==='zoom')return await zoomBoosterCard(i,id,position);
    if(type==='test'&&action==='finish')return await showResetModal(i,id);
+   if(type==='reset'&&action==='confirm')return await showFullResetModal(i,id);
+   if(type==='catalog'&&action==='page')return await pageCatalog(i,id,Math.max(1,Number(position)||1));
    if(type==='import'){
     if(action==='view')return await previewImport(i,id,Number(position));
     if(action==='adjust')return await showCropModal(i,id);
@@ -822,4 +983,4 @@ async function handle(i){
   catch(x){console.error('Impossible de signaler erreur cartes :',x.message);}
  }
 }
-module.exports={commands,init,handle};
+module.exports={commands,init,handle,__testing:{cooldownRemaining,claimBooster}};
