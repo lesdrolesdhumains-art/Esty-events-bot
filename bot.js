@@ -1,6 +1,6 @@
 'use strict';
 // Point d'entrée principal d'ecloudserv : MAIN_FILE=bot.js (ne pas modifier).
-console.log('🚀 Maîtresse du Jeu : lancement depuis bot.js (Champions + Brawlhalla)');
+console.log('🚀 Maîtresse du Jeu : Champions + Brawlhalla + Drôles de Cartes');
 require('dotenv').config();
 const crypto=require('node:crypto');
 const {
@@ -9,6 +9,7 @@ const {
 }=require('discord.js');
 const commands=require('./commands');
 const brawl=require('./brawl');
+const cartes=require('./cartes');
 const database=require('./champion-db');
 const bank=require('./banque');
 const {wordsOf,showWords,qualified,finalPoints,initialState,isStaff,canBuzz}=require('./champion-core');
@@ -451,6 +452,7 @@ async function tick(){
 client.on(Events.InteractionCreate,async i=>{
  try{
   if(!i.guildId||i.guildId!==GUILD)return;
+  if((i.isChatInputCommand() && ['cartes','booster','collection','echange','carte','classement-cartes'].includes(i.commandName)) || ((i.isButton()||i.isModalSubmit()) && i.customId.startsWith('ldh:'))) return await cartes.handle(i);
   if(i.isChatInputCommand() && i.commandName==='brawl')return await brawl.handle(i);
   if(i.isChatInputCommand() && i.commandName==='champion')return await doChat(i);
   if(i.isButton() && i.customId.startsWith('champ:'))return await doButton(i);
@@ -466,8 +468,8 @@ client.once(Events.ClientReady,async ready=>{
  try{
   const rest=new REST({version:'10'}).setToken(process.env.DISCORD_TOKEN);
   // Cette synchronisation REMPLACE les anciennes commandes du serveur /roue /probleme /animation.
-  await rest.put(Routes.applicationGuildCommands(ready.user.id,GUILD),{body:commands.map(c=>c.toJSON())});
-  console.log('✅ /champion et /brawl synchronisés ; anciennes commandes roue retirées.');
+  await rest.put(Routes.applicationGuildCommands(ready.user.id,GUILD),{body:[...commands,...cartes.commands].map(c=>c.toJSON())});
+  console.log('✅ /champion, /brawl, /cartes, /booster, /collection, /echange, /carte, /classement-cartes synchronisés.');
  }catch(e){console.error('❌ Échec synchronisation des commandes :',e);}
  // Le minuteur ne reprend pas à l’aveugle après redémarrage : /champion partie reprendre.
  setInterval(()=>tick().catch(e=>console.error('❌ Timer champion :',e)),2000).unref();
@@ -476,6 +478,7 @@ client.once(Events.ClientReady,async ready=>{
  try{
   await database.init();
   await brawl.init();
+  await cartes.init(database.pool,client);
   const s=await state();
   if(s.status==='running'){s.status='paused';await persist(s);console.log('⏸️ Partie sauvegardée mise en pause après redémarrage.');}
   await client.login(process.env.DISCORD_TOKEN);

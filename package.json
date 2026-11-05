@@ -1,12 +1,12 @@
 {
   "name": "esty-events-les-droles-de-champions",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "La Maîtresse du Jeu — Les Drôles de Champions et Brawlhalla",
+  "description": "La Maîtresse du Jeu — Champions, Brawlhalla et Les Drôles de Cartes",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "check": "node --check bot.js && node --check index.js && node --check commands.js && node --check brawl.js && node --check champion-db.js && node --check champion-core.js && node --check banque.js",
+    "check": "node --check bot.js && node --check index.js && node --check commands.js && node --check brawl.js && node --check champion-db.js && node --check champion-core.js && node --check banque.js && node --check cartes.js && node --check cartes-render.js && node --check cartes-utils.js",
     "test": "node --test tests/*.test.js"
   },
   "engines": {
@@ -15,6 +15,7 @@
   "dependencies": {
     "discord.js": "^14.19.3",
     "dotenv": "^16.6.1",
-    "pg": "^8.16.0"
+    "pg": "^8.16.0",
+    "sharp": "^0.34.4"
   }
 }
