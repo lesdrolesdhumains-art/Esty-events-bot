@@ -20,6 +20,26 @@ async function cutPlanche(buf,disposition){
  }else if(disposition==='verticale'){
   if(height/5<220)throw Error('Planche trop petite : chaque carte doit faire au moins 220 pixels de haut.');
   slots=Array.from({length:5},(_,i)=>({left:0,top:Math.round(i*height/5),width,height:Math.round((i+1)*height/5)-Math.round(i*height/5)}));
+ }else if(disposition==='trois_deux'){
+  // Gabarit officiel des planches Les Drôles d'Humains :
+  // titre en haut ; 3 cartes en ligne supérieure ; 2 cartes élargies en bas.
+  // Coordonnées proportionnelles : s'adaptent à différentes résolutions
+  // sans rogner les cadres, noms, adjectifs ni mentions de rareté.
+  if(width<720||height<560)throw Error('Planche 3+2 trop petite : envoie l’image originale, au moins 720 × 560 pixels.');
+  const boxes=[
+   [0.040,0.094,0.339,0.550],  // commune — haut gauche
+   [0.346,0.094,0.651,0.550],  // peu commune — haut centre
+   [0.659,0.094,0.958,0.550],  // rare — haut droite
+   [0.066,0.545,0.492,0.984],  // épique — bas gauche
+   [0.504,0.542,0.951,0.984]   // légendaire — bas droite
+  ];
+  slots=boxes.map(([x1,y1,x2,y2])=>{
+   const left=Math.max(0,Math.floor(x1*width));
+   const top=Math.max(0,Math.floor(y1*height));
+   const right=Math.min(width,Math.ceil(x2*width));
+   const bottom=Math.min(height,Math.ceil(y2*height));
+   return {left,top,width:right-left,height:bottom-top};
+  });
  }else throw Error('Disposition de planche non reconnue.');
  const input=await base.toBuffer();
  return Promise.all(slots.map(s=>sharp(input).extract(s).toBuffer().then(prepareImage)));

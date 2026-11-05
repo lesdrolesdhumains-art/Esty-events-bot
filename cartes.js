@@ -37,11 +37,11 @@ admin.addSubcommand(s=>s.setName('ajouter-joueur').setDescription('Importer cinq
  .addAttachmentOption(o=>o.setName('rare').setDescription('Carte rare').setRequired(true))
  .addAttachmentOption(o=>o.setName('epique').setDescription('Carte épique').setRequired(true))
  .addAttachmentOption(o=>o.setName('legendaire').setDescription('Carte légendaire').setRequired(true)));
-admin.addSubcommand(s=>s.setName('importer-planche').setDescription('Importer une planche de 5 cartes dans l’ordre des raretés')
+admin.addSubcommand(s=>s.setName('importer-planche').setDescription('Importer une planche (3 cartes en haut + 2 en bas, ou alignées)')
  .addStringOption(o=>o.setName('nom').setDescription('Nom du personnage').setMinLength(2).setMaxLength(50).setRequired(true))
  .addAttachmentOption(o=>o.setName('planche').setDescription('Image de la planche').setRequired(true))
- .addStringOption(o=>o.setName('disposition').setDescription('Disposition sans bordures externes').setRequired(true)
-  .addChoices({name:'5 cartes côte à côte',value:'horizontale'},{name:'5 cartes les unes sous les autres',value:'verticale'})));
+ .addStringOption(o=>o.setName('disposition').setDescription('Choisis 3 en haut + 2 en bas pour tes planches illustrées').setRequired(true)
+  .addChoices({name:'3 cartes en haut + 2 en bas (planches LDH)',value:'trois_deux'},{name:'5 cartes côte à côte',value:'horizontale'},{name:'5 cartes les unes sous les autres',value:'verticale'})));
 admin.addSubcommand(s=>s.setName('ajouter-prestige').setDescription('Ajouter une Légende des Légendaires')
  .addStringOption(o=>o.setName('titre').setDescription('Titre de la carte spéciale').setMinLength(3).setMaxLength(100).setRequired(true))
  .addAttachmentOption(o=>o.setName('image').setDescription('Image de la carte Prestige').setRequired(true)));
@@ -399,8 +399,11 @@ async function lastBooster(guild,user){
 async function boosterReply(i,boost,newly){
  const cards=await getImages(i.guildId,boost.ids);
  const image=await panel(cards,{title:`Booster de ${i.user.username}`,subtitle:`5 cartes · ${boost.date||boost.paris_day}`,columns:5});
- const opts={content:`${newly?'🎉 **Ton booster est ouvert !**':'🎁 **Voici ton dernier booster !**'}\n${cards.map(c=>`• ${c.code} · ${safe(c.title)} — **${decorateTitle(c.tier)}**`).join('\n')}`,
- files:[new AttachmentBuilder(image,{name:'mon-booster.png'})],components:[rowButtons([{id:`ldh:share:${boost.id}`,label:boost.shared?'Déjà partagé':'📣 Partager dans #drôles-de-cartes',style:ButtonStyle.Primary,disabled:boost.shared}])]};
+ const opts={content:`${newly?'🎉 **Ton booster est ouvert !**':'🎁 **Voici ton dernier booster !**'}\n${cards.map(c=>`• ${c.code} · ${safe(c.title)} — **${decorateTitle(c.tier)}**`).join('\n')}\n\n🔍 **Appuie sur Carte 1 à Carte 5 pour afficher l’illustration originale en grand (visible uniquement par toi).**`,
+ files:[new AttachmentBuilder(image,{name:'mon-booster.png'})],components:[
+  rowButtons(cards.map((c,j)=>({id:`ldh:booster:zoom:${boost.id}:${j}`,label:`🔍 Carte ${j+1}`}))),
+  rowButtons([{id:`ldh:share:${boost.id}`,label:boost.shared?'Déjà partagé':'📣 Partager dans #drôles-de-cartes',style:ButtonStyle.Primary,disabled:boost.shared}])
+ ]};
  return i.editReply(opts);
 }
 async function handleBooster(i){
@@ -424,11 +427,40 @@ async function shareBooster(i,id){
   if(!channel?.isTextBased()||!channel.send)err('Salon de partage inaccessible au bot.');
   const cards=await getImages(i.guildId,b.card_ids,db);
   const artwork=await panel(cards,{title:`Booster de ${i.user.username}`,subtitle:`5 découvertes · ${b.paris_day}`,columns:5});
-  await channel.send({content:`${(await getMode(i.guildId,db)).mode==='test'?'🧪 **MESSAGE DE TEST — NE COMPTE PAS POUR LE LANCEMENT**\n':''}🎴 **${safe(i.user.username)} partage son booster !**\n${cards.map(c=>`• ${c.code} — **${decorateTitle(c.tier)}**`).join('\n')}`,
-   files:[new AttachmentBuilder(artwork,{name:'booster-partage.png'})],...noMentions});
+  await channel.send({content:`${(await getMode(i.guildId,db)).mode==='test'?'🧪 **MESSAGE DE TEST — NE COMPTE PAS POUR LE LANCEMENT**\n':''}🎴 **${safe(i.user.username)} partage son booster !**\n${cards.map(c=>`• ${c.code} — **${decorateTitle(c.tier)}**`).join('\n')}\n\n🔍 Clique sur un bouton pour agrandir une carte (réponse privée).`,
+   files:[new AttachmentBuilder(artwork,{name:'booster-partage.png'})],
+   components:[rowButtons(cards.map((c,j)=>({id:`ldh:booster:zoom:${b.id}:${j}`,label:`🔍 Carte ${j+1}`})))],...noMentions});
   await db.query('UPDATE ldh_boosters SET shared_at=now() WHERE id=$1',[id]);
  });
  return i.editReply('✅ Booster publié une seule fois dans **#drôles-de-cartes** !');
+}
+/** Carte agrandie : image originale, jamais seulement un zoom de la mosaïque.
+ *  Le propriétaire peut ouvrir toute carte de son booster privé ; les autres
+ *  membres n'y accèdent que si le booster a été volontairement partagé. */
+async function zoomBoosterCard(i,boosterId,position){
+ await i.deferReply({flags:EP});
+ const index=Number(position);
+ if(!/^[0-9]+$/.test(String(position))||!Number.isInteger(index)||index<0||index>4)err('Numéro de carte invalide.');
+ const {rows}=await usePool().query(
+  'SELECT user_id,card_ids,shared_at FROM ldh_boosters WHERE guild_id=$1 AND id=$2',
+  [i.guildId,boosterId]
+ );
+ const boost=rows[0];
+ if(!boost)err('Ce booster est introuvable (il a peut-être été effacé à la fin du test).');
+ if(boost.user_id!==i.user.id&&!boost.shared_at)err('Ce booster est privé. Seul son propriétaire peut consulter ses cartes.');
+ const ids=typeof boost.card_ids==='string'?JSON.parse(boost.card_ids):boost.card_ids;
+ if(!Array.isArray(ids)||ids.length!==5||!ids[index])err('Impossible de retrouver cette carte.');
+ const {rows:result}=await usePool().query(
+  'SELECT code,title,tier,image FROM ldh_cards WHERE guild_id=$1 AND id=$2',
+  [i.guildId,ids[index]]
+ );
+ const card=result[0];
+ if(!card?.image)err('L’image originale de cette carte est introuvable.');
+ return i.editReply({
+  content:`🔍 **Carte ${index+1}/5 : ${safe(card.title)}**\n${card.code} · **${decorateTitle(card.tier)}**\nAppuie sur l’image pour la voir en plein écran, puis zoome avec les doigts.`,
+  files:[new AttachmentBuilder(card.image,{name:`carte-${card.code}.webp`})],
+  ...noMentions
+ });
 }
 async function collectData(guild,user,album,person,pg){
  const key=normalize(person||'');
@@ -628,7 +660,8 @@ async function handle(i){
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:test:submit:'))return await finishTest(i,i.customId.split(':')[3]);
   if(i.isModalSubmit()&&i.customId.startsWith('ldh:offer:'))return await offerModal(i,i.customId.split(':')[2]);
   if(i.isButton()&&i.customId.startsWith('ldh:')){
-   const [_,type,action,id]=i.customId.split(':');
+   const [_,type,action,id,position]=i.customId.split(':');
+   if(type==='booster'&&action==='zoom')return await zoomBoosterCard(i,id,position);
    if(type==='test'&&action==='finish')return await showResetModal(i,id);
    if(type==='import')return await commitImport(i,action,id);
    if(type==='share')return await shareBooster(i,action);
